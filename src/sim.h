@@ -44,6 +44,7 @@ struct Rv64HartState {
 #define TENSIX_INST_PIPES 3
 #define TENSIX_INST_FIFO_SIZE 512
 #define REPLAY_BUF_SIZE 32
+#define REPLAY_BUF_ENTRIES REPLAY_BUF_SIZE
 #define SRC_ROWS 64
 #define SRC_RWC_ROWS SRC_ROWS
 #define DST_ROWS 1024
@@ -219,7 +220,7 @@ struct TensixState {
 
     uint16_t mop_zmask_hi16[TENSIX_INST_PIPES];
     uint32_t mop_cfg[TENSIX_INST_PIPES][9];
-    uint32_t replay_buf[TENSIX_INST_PIPES][REPLAY_BUF_SIZE];
+    uint32_t replay_buf[TENSIX_INST_PIPES][REPLAY_BUF_ENTRIES];
     uint32_t replay_index[TENSIX_INST_PIPES];
     uint32_t replay_left[TENSIX_INST_PIPES];
     bool replay_execute_while_loading[TENSIX_INST_PIPES];
@@ -592,6 +593,8 @@ uint32_t tensix_cfg_rd32(TensixState *p_tensix, uint32_t bank, uint32_t offset);
 void tensix_cfg_wr32(TensixState *p_tensix, uint32_t bank, uint32_t offset, uint32_t data);
 uint32_t tensix_debug_array_rd32(const TensixState *p_tensix, uint32_t cmd);
 uint32_t tensix_dst_rd32(TensixState *p_tensix, uint32_t pipe, uint32_t offset);
+uint32_t tensix_tile_counter_rd32(TensixState *p_tensix, uint32_t counter, uint32_t index);
+void tensix_tile_counter_wr32(TensixState *p_tensix, uint32_t counter, uint32_t index, uint32_t data);
 bool tensix_decode_and_execute(TensixState *p_tensix, uint32_t pipe, uint32_t inst);
 
 uint32_t sfpu_mad(uint32_t a, uint32_t b, uint32_t c);

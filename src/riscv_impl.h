@@ -1126,6 +1126,8 @@ static void RV_XLEN_PREFIX(ecall_ebreak)(RiscvHartState *p_hart, uint32_t inst) 
     if (inst == 0x73) {
         TTSIM_ERROR(UnimplementedFunctionality, "ecall");
 #if XLEN == 64
+    } else if (inst == 0x30200073) { // MRET
+        TTSIM_ERROR(UnimplementedFunctionality, "mret");
     } else if (inst == 0xFC000073) {
         // tt.cache.cflush.d.l1 zero -- writes back and invalidates entire L1 D$ (src reg in bits 19:15)
     } else if (inst == 0xFC200073) {
@@ -1379,6 +1381,7 @@ static void RV_XLEN_PREFIX(csrrci)(RiscvHartState *p_hart, uint32_t inst) {
 }
 
 #if XLEN == 64
+
 static void RV_XLEN_PREFIX(custom_0)(RiscvHartState *p_hart, uint32_t inst) {
     TTSIM_ERROR(UnimplementedFunctionality, "inst=0x%x", inst);
 }

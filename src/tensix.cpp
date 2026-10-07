@@ -10,8 +10,7 @@
 #include "tensix_decode.h" // generated
 #include <algorithm>
 
-#define IS_TENSIX_NOP(inst) (bits<31,24>(inst) == 0x02)
-#define TENSIX_NOP (0x02 << 24)
+#define IS_TENSIX_NOP(inst) (bits<31,24>(inst) == TENSIX_OPCODE_NOP)
 
 void tensix_init(TensixState *p_tensix, uint32_t tile_id, uint32_t tensix_id) {
     memset(p_tensix, 0, sizeof(TensixState));
@@ -47,7 +46,7 @@ uint32_t tensix_debug_array_rd32(const TensixState *p_tensix, uint32_t cmd) {
 }
 
 static void tensix_push_inst_fifo(TensixState *p_tensix, uint32_t pipe, uint32_t inst) {
-    if (inst == TENSIX_NOP) {
+    if (IS_TENSIX_NOP(inst)) {
         return; // eat NOPs here so we don't overflow as quickly on MOP
     }
     uint32_t inst_wr_ptr = p_tensix->inst_wr_ptr[pipe];
@@ -61,32 +60,34 @@ static void tensix_push_inst_fifo(TensixState *p_tensix, uint32_t pipe, uint32_t
 
 static void replay_expander(TensixState *p_tensix, uint32_t pipe, uint32_t inst) {
     if (p_tensix->replay_left[pipe]) {
+        TTSIM_VERIFY((bits<31,24>(inst) != TENSIX_OPCODE_REPLAY), UndefinedBehavior,
+            "nested REPLAY instruction loaded inside a REPLAY buffer: inst=0x%x", inst);
         uint32_t index = p_tensix->replay_index[pipe];
         p_tensix->replay_buf[pipe][index] = inst;
-        p_tensix->replay_index[pipe] = (index + 1) % REPLAY_BUF_SIZE;
+        p_tensix->replay_index[pipe] = index + 1;
         p_tensix->replay_left[pipe]--;
         if (p_tensix->replay_execute_while_loading[pipe]) {
             tensix_push_inst_fifo(p_tensix, pipe, inst);
         }
-    } else if (bits<31,24>(inst) == 0x04) { // REPLAY
-        TTSIM_VERIFY(!(inst & 0xC), NonContractualBehavior, "REPLAY inst=0x%x", inst); // unused bits in encoding
+    } else if (bits<31,24>(inst) == TENSIX_OPCODE_REPLAY) {
+        TTSIM_VERIFY(!(inst & 0xF83C0C), NonContractualBehavior, "REPLAY inst=0x%x", inst); // unused bits in encoding
         uint32_t load_mode = bits<0,0>(inst);
         uint32_t execute_while_loading = bits<1,1>(inst);
         if (!load_mode) {
             TTSIM_VERIFY(!execute_while_loading, UnimplementedFunctionality, "execute_while_loading=%d with load_mode=%d", execute_while_loading, load_mode);
         }
         uint32_t len = bits<13,4>(inst);
-        TTSIM_VERIFY((len >= 1) && (len <= REPLAY_BUF_SIZE), UnsupportedFunctionality, "len=%d", len);
         uint32_t start_idx = bits<23,14>(inst);
-        TTSIM_VERIFY(start_idx < REPLAY_BUF_SIZE, UnsupportedFunctionality, "start_idx=%d", start_idx);
+        TTSIM_VERIFY(len && (start_idx + len <= REPLAY_BUF_ENTRIES), UndefinedBehavior, "start_idx=%d len=%d", start_idx, len);
 
+        uint32_t base = 0;
         if (load_mode) {
-            p_tensix->replay_index[pipe] = start_idx;
+            p_tensix->replay_index[pipe] = base + start_idx;
             p_tensix->replay_left[pipe] = len;
             p_tensix->replay_execute_while_loading[pipe] = execute_while_loading;
         } else {
             for (uint32_t i = 0; i < len; i++) {
-                tensix_push_inst_fifo(p_tensix, pipe, p_tensix->replay_buf[pipe][(start_idx + i) % REPLAY_BUF_SIZE]);
+                tensix_push_inst_fifo(p_tensix, pipe, p_tensix->replay_buf[pipe][base + start_idx + i]);
             }
         }
     } else {
@@ -187,8 +188,8 @@ void tensix_push_inst(TensixState *p_tensix, uint32_t pipe, uint32_t inst, bool 
     }
     uint32_t opcode = bits<31,24>(inst);
     switch (opcode) {
-        case 0x01: mop_expander(p_tensix, pipe, inst); break; // MOP
-        case 0x03: mop_cfg(p_tensix, pipe, inst); break; // MOP_CFG
+        case TENSIX_OPCODE_MOP: mop_expander(p_tensix, pipe, inst); break;
+        case TENSIX_OPCODE_MOP_CFG: mop_cfg(p_tensix, pipe, inst); break;
         default: replay_expander(p_tensix, pipe, inst); break; // everything else is just passthrough
     }
 }
@@ -1162,6 +1163,9 @@ TENSIX_EXECUTE_MOVB2D() {
     }
 #endif
     TTSIM_VERIFY((src_a_fmt != 12) && (src_a_fmt != 13), UndefinedBehavior, "src_a_fmt=%d", src_a_fmt);
+    if ((TT_ARCH_VERSION == 1) && p_config->ALU_ACC_CTRL_Fp32_enabled) {
+        src_a_fmt = 4;
+    }
     bool use_8b_exponent;
     if ((src_a_fmt == 0) || (src_a_fmt == 4) || (src_a_fmt == 5) || (src_a_fmt == 6) || (src_a_fmt == 7) || // fp32, tf32, bf16, bfp8, bfp4
         (src_a_fmt == 8) || (src_a_fmt == 9)) { // int32, int16
@@ -4494,7 +4498,7 @@ TENSIX_EXECUTE_SFP_STOCH_RND() {
     TTSIM_VERIFY((instr_mod1 <= 7) || (instr_mod1 == 12) || (instr_mod1 == 13), UndefinedBehavior, "instr_mod1=%d", instr_mod1);
     TTSIM_VERIFY((instr_mod1 == 1) || (instr_mod1 == 2) || (instr_mod1 == 3) || (instr_mod1 == 6) || (instr_mod1 == 7),
         UnimplementedFunctionality, "instr_mod1=%d", instr_mod1);
-    // XXX check lreg_src_b?
+    // XXX check lreg_src_b == 9?
 
     uint32_t mask = p_tensix->cc_en ? p_tensix->cc : 0xFFFFFFFF;
     for_each_lane(mask, [=](uint32_t lane) {
@@ -5030,17 +5034,24 @@ TENSIX_EXECUTE_SEMGET() {
 
 TENSIX_EXECUTE_SEMWAIT() {
     TTSIM_VERIFY(__builtin_popcount(sem_sel) == 1, UnsupportedFunctionality, "sem_sel=0x%x is not one-hot", sem_sel);
-    uint32_t sem_index = __builtin_ctz(sem_sel);
-    TTSIM_VERIFY(sem_index < std::size(p_tensix->sem), AssertionFailure, "sem_index=%d out of range", sem_index);
     TTSIM_VERIFY(wait_sem_cond, UndefinedBehavior, "wait_sem_cond=%d", wait_sem_cond);
     TTSIM_VERIFY((wait_sem_cond == 1) || (wait_sem_cond == 2), UnsupportedFunctionality, "wait_sem_cond=%d", wait_sem_cond);
     // XXX stall_res ignored for now
 
-    if (wait_sem_cond == 2) { // wait while max
-        return p_tensix->sem[sem_index] < p_tensix->sem_max[sem_index];
-    } else { // wait while zero
-        return p_tensix->sem[sem_index] > 0;
+    for (; sem_sel; sem_sel &= sem_sel - 1) {
+        uint32_t sem_index = __builtin_ctz(sem_sel);
+        TTSIM_VERIFY(sem_index < std::size(p_tensix->sem), AssertionFailure, "sem_index=%d out of range", sem_index);
+        if (wait_sem_cond == 2) { // wait while max
+            if (p_tensix->sem[sem_index] >= p_tensix->sem_max[sem_index]) {
+                return false;
+            }
+        } else { // wait while zero
+            if (!p_tensix->sem[sem_index]) {
+                return false;
+            }
+        }
     }
+    return true;
 }
 
 TENSIX_EXECUTE_WRCFG() {
@@ -5207,10 +5218,10 @@ static bool tensix_execute_inst(TensixState *p_tensix, uint32_t pipe, uint32_t i
             "TEN-2932: SFPU result write to LReg[%d] is corrupted when ENABLE_DEST_INDEX is set (opcode=0x%x)", lreg_dest, opcode);
     }
     switch (opcode) {
-        case 0x01: TTSIM_ERROR(AssertionFailure, "MOP should not exist at this stage"); // MOP
-        case 0x02: TTSIM_ERROR(AssertionFailure, "NOP should not exist at this stage"); // NOP
-        case 0x03: TTSIM_ERROR(AssertionFailure, "MOP_CFG should not exist at this stage"); // MOP_CFG
-        case 0x04: TTSIM_ERROR(AssertionFailure, "REPLAY should not exist at this stage"); // REPLAY
+        case TENSIX_OPCODE_MOP: TTSIM_ERROR(UndefinedBehavior, "MOP should not exist at this stage");
+        case TENSIX_OPCODE_NOP: TTSIM_ERROR(AssertionFailure, "NOP should not exist at this stage");
+        case TENSIX_OPCODE_MOP_CFG: TTSIM_ERROR(UndefinedBehavior, "MOP_CFG should not exist at this stage");
+        case TENSIX_OPCODE_REPLAY: TTSIM_ERROR(AssertionFailure, "REPLAY should not exist at this stage");
         TENSIX_OPCODE_CASES() // use the generated decoder for the rest
         default: TTSIM_ERROR(UndefinedBehavior, "opcode=0x%x", opcode);
     }

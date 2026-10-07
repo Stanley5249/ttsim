@@ -73,5 +73,10 @@ def main():
             f.write(f'    case 0x{opcode:02X}: return tensix_decode_{name.lower()}(p_tensix, pipe, inst); \\\n')
         f.write('\n')
 
+        for (name, info) in opcodes.items():
+            opcode = info['opcode']
+            f.write(f'#define TENSIX_OPCODE_{name} 0x{opcode:02X}\n')
+        f.write('\n')
+
 if __name__ == '__main__':
     main()
