@@ -1,0 +1,687 @@
+// SPDX-FileCopyrightText: (c) 2025-2026 Tenstorrent USA, Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+// Host-visible PCIe endpoint of the currently-selected chip: config space and the BAR0/BAR2/BAR4
+// windows (TLBs, iATU, DMA engines).
+#include "sim.h"
+#include "pcie.h"
+
+#define BAR0_BASE 0x100000000ull // 4GiB
+#define BAR2_BASE 0x120000000ull // 4GiB + 512MiB
+#define BAR4_BASE 0x800000000ull // 32GiB
+
+#define BAR0_SIZE (512 * 1024*1024)
+#define BAR2_SIZE (1 * 1024*1024)
+#if TT_ARCH_VERSION == 1
+#define BAR4_SIZE (32ull * 1024*1024*1024) // 32GiB
+#define REVISION_ID 0
+#else
+#define BAR4_SIZE (32 * 1024*1024)
+#define REVISION_ID 1
+#endif
+
+#if TT_ARCH_VERSION == 0
+// WH BAR4 is mapped to the top 32MB of BAR0
+#define BAR4_SOC_OFFSET (BAR0_SIZE - BAR4_SIZE)
+
+#define ARC_BAR0_CSM_BASE 0x1FE80000
+#define ARC_BAR0_CSM_LIMIT 0x1FEFFFFF
+#define ARC_BAR0_APB_BASE 0x1FF00000
+#define ARC_BAR0_APB_LIMIT 0x1FFFFFFF
+#define ARC_COORD (0 | (10 << 6))
+#define ARC_NOC_CSM_BASE 0x810000000ull
+#define ARC_NOC_APB_BASE 0x880000000ull
+#define IATU_BASE 0x1200ull
+#define IATU_LIMIT 0x31FFull
+#define IATU_SUPPORTED_INBOUND_CTRL_2 0xC8000400u
+#define IATU_SUPPORTED_INBOUND_TARGET 0x1E000000ull
+#define IATU_OUTBOUND_WINDOW_LIMIT 0xFFFDFFFFu
+
+#define DMA_BUFFER_SIZE (4u * 1024)
+#elif TT_ARCH_VERSION == 1
+#define PCIE_COORD (2 | (0 << 6))
+#define PCIE_NIU0_BASE 0x1FD04000
+#define PCIE_NIU0_LIMIT 0x1FD05FFF
+#define PCIE_NIU1_BASE 0x1FD14000
+#define PCIE_NIU1_LIMIT 0x1FD15FFF
+
+#define IATU_BASE 0x1000ull
+#define IATU_LIMIT 0x2FFFull
+#define INCREASE_REGION_SIZE (1u << 13) // region_ctrl_1: extends a region past 4GiB
+#define IATU_OUTBOUND_WINDOW_LIMIT ((1ull << 58) - 1) // NoC-to-host window is 2^58 bytes
+
+// BH BAR2 read DMA channel 0 registers
+#define DMA_RDCH0_BASE 0x100
+#define DMA_RDCH0_LIMIT 0x1A8
+#define DMA_BUFFER_SIZE (4u * 1024)
+#endif
+
+static void verify_iatu_region_write(uint32_t offset, uint32_t value) {
+    uint32_t slot = offset / 0x100;
+    TTSIM_VERIFY(slot < 32, UnimplementedFunctionality, "bar2: iATU offset=0x%x", offset);
+    bool inbound = slot & 1;
+    uint32_t region = slot >> 1;
+    uint32_t reg = offset % 0x100;
+    if (!inbound) {
+        const IatuRegion &r = g_p_tile.iatu_outbound[region];
+        if (r.ctrl_2 & IATU_REGION_ENABLE) {
+            uint64_t base = (uint64_t(r.upper_base) << 32) | r.lower_base;
+#if TT_ARCH_VERSION == 0
+            uint64_t limit = (uint64_t(r.upper_base) << 32) | r.lower_limit;
+#else
+            uint64_t limit = (uint64_t(r.upper_limit) << 32) | r.lower_limit;
+#endif
+            TTSIM_VERIFY(base <= limit, UndefinedBehavior,
+                "bar2: outbound iATU region=%u base=0x%llx > limit=0x%llx", region, base, limit);
+            TTSIM_VERIFY(limit <= IATU_OUTBOUND_WINDOW_LIMIT, UndefinedBehavior,
+                "bar2: outbound iATU region=%u limit=0x%llx outside window", region, limit);
+        }
+#if TT_ARCH_VERSION == 1
+        switch (reg) {
+            case 0x00:
+                TTSIM_VERIFY(!(value & ~INCREASE_REGION_SIZE), UnimplementedFunctionality, "bar2: iATU region_ctrl_1=0x%x", value);
+                break;
+            case 0x04:
+                TTSIM_VERIFY(!(value & ~IATU_REGION_ENABLE), UnimplementedFunctionality, "bar2: iATU region_ctrl_2=0x%x", value);
+                break;
+            case 0x1C:
+                TTSIM_VERIFY(!value, UnimplementedFunctionality, "bar2: iATU region_ctrl_3=0x%x", value);
+                break;
+        }
+#endif
+        return;
+    }
+#if TT_ARCH_VERSION == 0
+    // verify that configuration aligns with simulator's hard-coded inbound iatu
+    TTSIM_VERIFY(region == 1, UnimplementedFunctionality, "bar2: inbound iATU region=%d", region);
+    switch (reg) {
+        case 0x00:
+            TTSIM_VERIFY(value == 0, UnimplementedFunctionality, "bar2: iATU ctrl_1=0x%x", value);
+            return;
+        case 0x04:
+            TTSIM_VERIFY(!(value & IATU_REGION_ENABLE) || (value == IATU_SUPPORTED_INBOUND_CTRL_2),
+                UnimplementedFunctionality, "bar2: inbound iATU ctrl_2=0x%x", value);
+            return;
+        case 0x14:
+            TTSIM_VERIFY(value == uint32_t(IATU_SUPPORTED_INBOUND_TARGET), UnimplementedFunctionality,
+                "bar2: inbound iATU lower_target=0x%x", value);
+            return;
+        case 0x18:
+            TTSIM_VERIFY(value == uint32_t(IATU_SUPPORTED_INBOUND_TARGET >> 32), UnimplementedFunctionality,
+                "bar2: inbound iATU upper_target=0x%x", value);
+            return;
+        default:
+            TTSIM_ERROR(UnimplementedFunctionality, "bar2: iATU reg offset=0x%x", reg);
+    }
+#elif TT_ARCH_VERSION == 1
+    TTSIM_ERROR(UnimplementedFunctionality, "bar2: inbound iATU region=%u", region);
+#endif
+}
+
+static uint32_t *iatu_reg_field(uint32_t offset) {
+    uint32_t slot = offset / 0x100;
+    TTSIM_VERIFY(slot < 32, UnimplementedFunctionality, "bar2: iATU offset=0x%x", offset);
+    uint32_t reg = offset % 0x100;
+    IatuRegion *r = (slot & 1) ? &g_p_tile.iatu_inbound[slot >> 1] : &g_p_tile.iatu_outbound[slot >> 1];
+    switch (reg) {
+        case 0x00: return &r->ctrl_1;
+        case 0x04: return &r->ctrl_2;
+        case 0x08: return &r->lower_base;
+        case 0x0C: return &r->upper_base;
+        case 0x10: return &r->lower_limit;
+        case 0x14: return &r->lower_target;
+        case 0x18: return &r->upper_target;
+#if TT_ARCH_VERSION == 1
+        case 0x1C: return &r->ctrl_3;
+        case 0x20: return &r->upper_limit;
+#endif
+        default: TTSIM_ERROR(UnimplementedFunctionality, "bar2: iATU reg offset=0x%x", reg);
+    }
+}
+
+void pcie_init() {
+    for (uint32_t d = 0; d < NUM_MMIO_CHIPS; d++) {
+        // Each MMIO device's BARs live in its own host-physical window (see PER_DEVICE_PADDR_STRIDE).
+        uint64_t off = uint64_t(d) * PER_DEVICE_PADDR_STRIDE;
+        PcieTile *p_tile = &g_chips[d].p_tile;
+        p_tile->pci_cfg_bar0_lo = uint32_t(BAR0_BASE + off) | 0x4; // BAR0: 64-bit memory, not prefetchable
+        p_tile->pci_cfg_bar0_hi = uint32_t((BAR0_BASE + off) >> 32);
+        p_tile->pci_cfg_bar2_lo = uint32_t(BAR2_BASE + off) | 0x4; // BAR2
+        p_tile->pci_cfg_bar2_hi = uint32_t((BAR2_BASE + off) >> 32);
+        p_tile->pci_cfg_bar4_lo = uint32_t(BAR4_BASE + off) | 0x4; // BAR4
+        p_tile->pci_cfg_bar4_hi = uint32_t((BAR4_BASE + off) >> 32);
+        p_tile->pci_cfg_command_status = 0x2; // memory space enabled, as left by firmware enumeration
+        p_tile->pci_cfg_interrupt_line_pin = 0xFF; // interrupt line=0xFF, pin=0 (no INTx)
+    }
+}
+
+uint32_t pcie_config_rd32(uint32_t device, uint32_t offset) {
+    switch (offset) {
+#if TT_ARCH_VERSION == 0
+        case 0x0: return 0x1E52 | (0x401E << 16); // vendor ID, device ID
+#elif TT_ARCH_VERSION == 1
+        case 0x0: return 0x1E52 | (0xB140 << 16); // vendor ID, device ID
+#endif
+        case 0x04: return g_chips[device].p_tile.pci_cfg_command_status;
+        case 0x08: return 0x12000000 | REVISION_ID;  // class code, subclass, prog-if, revision ID
+        case 0x0C: return g_chips[device].p_tile.pci_cfg_cache_latency_header;
+        case 0x10: return g_chips[device].p_tile.pci_cfg_bar0_lo;
+        case 0x14: return g_chips[device].p_tile.pci_cfg_bar0_hi;
+        case 0x18: return g_chips[device].p_tile.pci_cfg_bar2_lo;
+        case 0x1C: return g_chips[device].p_tile.pci_cfg_bar2_hi;
+        case 0x20: return g_chips[device].p_tile.pci_cfg_bar4_lo;
+        case 0x24: return g_chips[device].p_tile.pci_cfg_bar4_hi;
+        case 0x28: return 0; // cardbus CIS pointer (none)
+        case 0x2C: return 0; // subsystem vendor/device (non-Galaxy)
+        case 0x30: return 0; // expansion ROM pointer (none)
+        case 0x34: return 0; // capabilities pointer (none)
+        case 0x38: return 0; // reserved
+        case 0x3C: return g_chips[device].p_tile.pci_cfg_interrupt_line_pin;
+        default: TTSIM_ERROR(UnimplementedFunctionality, "offset=0x%x", offset);
+    }
+}
+
+void pcie_config_wr32(uint32_t device, uint32_t offset, uint32_t data) {
+    PcieTile *p_tile = &g_chips[device].p_tile;
+    uint32_t *p_reg;
+    uint32_t write_mask;
+    switch (offset) {
+        case 0x04: p_reg = &p_tile->pci_cfg_command_status; write_mask = 0xFFFF; break;
+        case 0x0C: p_reg = &p_tile->pci_cfg_cache_latency_header; write_mask = 0xFFFF; break;
+        case 0x10: p_reg = &p_tile->pci_cfg_bar0_lo; write_mask = uint32_t(~(uint64_t(BAR0_SIZE) - 1)); break;
+        case 0x14: p_reg = &p_tile->pci_cfg_bar0_hi; write_mask = uint32_t(~((uint64_t(BAR0_SIZE) - 1) >> 32)); break;
+        case 0x18: p_reg = &p_tile->pci_cfg_bar2_lo; write_mask = uint32_t(~(uint64_t(BAR2_SIZE) - 1)); break;
+        case 0x1C: p_reg = &p_tile->pci_cfg_bar2_hi; write_mask = uint32_t(~((uint64_t(BAR2_SIZE) - 1) >> 32)); break;
+        case 0x20: p_reg = &p_tile->pci_cfg_bar4_lo; write_mask = uint32_t(~(uint64_t(BAR4_SIZE) - 1)); break;
+        case 0x24: p_reg = &p_tile->pci_cfg_bar4_hi; write_mask = uint32_t(~((uint64_t(BAR4_SIZE) - 1) >> 32)); break;
+        case 0x30: return; // expansion ROM is write-ignore
+        case 0x3C: p_reg = &p_tile->pci_cfg_interrupt_line_pin; write_mask = 0xFF; break;
+        default: TTSIM_ERROR(UnimplementedFunctionality, "offset=0x%x", offset);
+    }
+    *p_reg = (*p_reg & ~write_mask) | (data & write_mask);
+}
+
+struct TlbTarget {
+    uint32_t coord;
+    uint32_t coord_start;
+    uint64_t addr;
+    bool mcast;
+};
+
+static TlbTarget tlb_translate(uint32_t offset, uint32_t size) {
+#if TT_ARCH_VERSION == 0
+    uint32_t tlb_index, window_bits;
+    if (offset < 0x9C00000) {
+        tlb_index = offset / 0x100000;
+        window_bits = 20; // 1 MiB TLBs (indices 0-155)
+    } else if (offset < 0xB000000) {
+        tlb_index = ((offset - 0x9C00000) / 0x200000) + 156;
+        window_bits = 21; // 2 MiB TLBs (indices 156-165)
+    } else {
+        tlb_index = ((offset - 0xB000000) / 0x1000000) + 166;
+        window_bits = 24; // 16 MiB TLBs (indices 166-185)
+    }
+    uint32_t window_mask = (1 << window_bits) - 1;
+    offset &= window_mask;
+    uint32_t n_addr_bits = 36 - window_bits; // number of local_offset bits in TLB config
+    TTSIM_VERIFY(tlb_index < std::size(g_p_tile.tlb_cfg), AssertionFailure, "tlb_index=%d", tlb_index);
+    TTSIM_VERIFY(offset + size - 1 <= window_mask, UnsupportedFunctionality, "TLB region overrun: offset=0x%x size=%d", offset, size);
+    uint64_t tlb_cfg = g_p_tile.tlb_cfg[tlb_index];
+    uint64_t addr_bits = tlb_cfg & ((1ull << n_addr_bits) - 1);
+    uint64_t addr = (addr_bits << window_bits) | offset;
+    tlb_cfg >>= n_addr_bits; // after this shift, bit positions correspond directly to the spec's "first bit" column relative to N
+    TTSIM_VERIFY(!(tlb_cfg & ~uint64_t(0x2EFFFFFF)), UnimplementedFunctionality, "tlb_cfg=0x%llx", tlb_cfg);
+    uint32_t ordering = bits<27,26>(tlb_cfg);
+    TTSIM_VERIFY(ordering != 3, UndefinedBehavior, "tlb_cfg ordering=%d", ordering);
+    bool mcast = bits<25,25>(tlb_cfg);
+    if (!mcast) {
+        TTSIM_VERIFY(!(tlb_cfg & 0x00FFF000), UnsupportedFunctionality,
+            "x_start/y_start set without mcast: tlb_cfg=0x%llx", tlb_cfg);
+    }
+    uint32_t coord = remap_virtual_coordinate(&g_p_tile.base, 0, tlb_cfg & 0xFFF);
+    uint32_t coord_start = mcast ? remap_virtual_coordinate(&g_p_tile.base, 0, (tlb_cfg >> 12) & 0xFFF) : 0;
+    return {coord, coord_start, addr, mcast};
+#elif TT_ARCH_VERSION == 1
+    uint32_t tlb_index = offset / 0x200000;
+    offset &= 0x1FFFFF;
+    TTSIM_VERIFY(3*tlb_index < std::size(g_p_tile.tlb_cfg), AssertionFailure, "tlb_index=%d", tlb_index);
+    TTSIM_VERIFY(offset + size - 1 <= 0x1FFFFF, UnsupportedFunctionality, "TLB region overrun: offset=0x%x size=%d", offset, size);
+    uint32_t tlb_cfg0 = g_p_tile.tlb_cfg[3*tlb_index + 0];
+    uint32_t tlb_cfg1 = g_p_tile.tlb_cfg[3*tlb_index + 1];
+    uint32_t tlb_cfg2 = g_p_tile.tlb_cfg[3*tlb_index + 2];
+    TTSIM_VERIFY(!(tlb_cfg2 & ~0x3AE7u), UnimplementedFunctionality, "tlb_cfg2=0x%x", tlb_cfg2);
+    uint32_t ordering = bits<7,6>(tlb_cfg2);
+    TTSIM_VERIFY(ordering != 3, UnimplementedFunctionality, "tlb_cfg ordering=%d", ordering);
+    uint64_t addr_bits = tlb_cfg0 | (uint64_t(tlb_cfg1 & 0x7FF) << 32);
+    uint64_t addr = (uint64_t(addr_bits) << 21) | offset;
+    bool mcast = bits<5,5>(tlb_cfg2);
+    bool static_vc = bits<9,9>(tlb_cfg2);
+    uint32_t static_vc_class = bits<13,12>(tlb_cfg2);
+    TTSIM_VERIFY(!static_vc || (mcast ? (static_vc_class == 2) : (static_vc_class <= 1)), UndefinedBehavior,
+        "static_vc_class=%d with mcast=%d", static_vc_class, mcast);
+    uint32_t coord = remap_virtual_coordinate(&g_p_tile.base, 0, bits<22,11>(tlb_cfg1)); // (x_end, y_end)
+    uint32_t coord_start = 0;
+    if (mcast) {
+        uint32_t x_start = bits<28,23>(tlb_cfg1);
+        uint32_t y_start = bits<31,29>(tlb_cfg1) | (bits<2,0>(tlb_cfg2) << 3);
+        coord_start = remap_virtual_coordinate(&g_p_tile.base, 0, x_start | (y_start << 6));
+    } else {
+        TTSIM_VERIFY(!(tlb_cfg1 & 0xFF800000) && !(tlb_cfg2 & 0x7), UnsupportedFunctionality,
+            "x_start/y_start set without mcast: tlb_cfg1=0x%x tlb_cfg2=0x%x", tlb_cfg1, tlb_cfg2);
+    }
+    return {coord, coord_start, addr, mcast};
+#endif
+}
+
+#if TT_ARCH_VERSION == 1
+static std::pair<uint32_t, uint64_t> tlb_translate_bar4(uint64_t offset, uint32_t size) {
+    uint32_t tlb_index = 202 + uint32_t(offset >> 32);
+    uint32_t window_offset = uint32_t(offset);
+    TTSIM_VERIFY(3*tlb_index < std::size(g_p_tile.tlb_cfg), AssertionFailure, "tlb_index=%d", tlb_index);
+    TTSIM_VERIFY(uint64_t(window_offset) + size <= 0x100000000ull, UnsupportedFunctionality, "TLB region overrun: offset=0x%x size=%d", window_offset, size);
+    uint32_t tlb_cfg0 = g_p_tile.tlb_cfg[3*tlb_index + 0];
+    uint32_t tlb_cfg1 = g_p_tile.tlb_cfg[3*tlb_index + 1];
+    uint32_t tlb_cfg2 = g_p_tile.tlb_cfg[3*tlb_index + 2];
+    TTSIM_VERIFY(!(tlb_cfg1 & ~0x58000FFFu), UnimplementedFunctionality, "tlb_cfg1=0x%x", tlb_cfg1);
+    uint32_t ordering = bits<28,27>(tlb_cfg1);
+    TTSIM_VERIFY(ordering != 3, UnimplementedFunctionality, "tlb_cfg ordering=%d", ordering);
+    TTSIM_VERIFY(!(tlb_cfg2 & ~0x7u), UnimplementedFunctionality, "tlb_cfg2=0x%x", tlb_cfg2);
+    bool static_vc = bits<30,30>(tlb_cfg1);
+    uint32_t static_vc_class = bits<2,1>(tlb_cfg2);
+    TTSIM_VERIFY(!static_vc || (static_vc_class <= 1), UndefinedBehavior, "static_vc_class=%d with unicast", static_vc_class);
+    uint64_t addr = (uint64_t(tlb_cfg0) << 32) | window_offset;
+    uint32_t coord = bits<11,0>(tlb_cfg1);
+    coord = remap_virtual_coordinate(&g_p_tile.base, 0, coord);
+    return {coord, addr};
+}
+#endif
+
+static void tlb_window_write(uint32_t offset, const void *p, uint32_t size) {
+    auto target = tlb_translate(offset, size);
+    if (target.mcast) {
+        uint32_t start_x = target.coord_start & 63, end_x = target.coord & 63;
+        uint32_t start_y = target.coord_start >> 6, end_y = target.coord >> 6;
+        uint32_t disabled_col_mask = g_p_tile.base.router_cfg_1[0];
+        uint32_t disabled_row_mask = g_p_tile.base.router_cfg_3[0];
+        TTSIM_VERIFY((start_x <= end_x) && (start_y <= end_y), UndefinedBehavior,
+            "multicast start (%d,%d) past end (%d,%d)", start_x, start_y, end_x, end_y);
+        TTSIM_VERIFY(!(((1ull << start_x) & NONTENSIX_COL_MASK) || ((1ull << start_y) & NONTENSIX_ROW_MASK) ||
+                       ((1ull << end_x) & NONTENSIX_COL_MASK) || ((1ull << end_y) & NONTENSIX_ROW_MASK)),
+            UndefinedBehavior, "multicast rectangle not within Tensix grid");
+        for (uint32_t y = start_y; y <= end_y; y++) {
+            for (uint32_t x = start_x; x <= end_x; x++) {
+                if ((disabled_col_mask & (1ull << x)) || (disabled_row_mask & (1ull << y))) {
+                    continue;
+                }
+                uint32_t coord = x | (y << 6);
+                tile_wr_bytes(coord, target.addr, p, size);
+            }
+        }
+    } else {
+        tile_wr_bytes(target.coord, target.addr, p, size);
+    }
+}
+
+static void tlb_window_read(uint32_t offset, void *p, uint32_t size) {
+    auto target = tlb_translate(offset, size);
+    TTSIM_VERIFY(!target.mcast, UndefinedBehavior, "multicast read");
+#if TT_ARCH_VERSION == 1
+    // XXX add noc_instance param to tile_rd_bytes and move this code into it
+    if ((target.coord == PCIE_COORD) && (target.addr >= PCIE_NIU_BASE) && (target.addr <= PCIE_NIU_LIMIT)) [[unlikely]] {
+        TTSIM_VERIFY((size == 4) && !(target.addr & 3), UndefinedBehavior, "pcie_niu: addr=0x%llx size=%d", target.addr, size);
+        mem_wr<uint32_t>(p, pcie_niu_rd32(0, target.addr - PCIE_NIU_BASE));
+        return;
+    }
+#endif
+    tile_rd_bytes(target.coord, target.addr, p, size);
+}
+
+static uint32_t *dma_reg_ptr(uint32_t offset) {
+    switch (offset) {
+#if TT_ARCH_VERSION == 0
+        case 0x208: return &g_p_tile.dma.write_transfer_size;
+        case 0x20c: return &g_p_tile.dma.write_sar_low;
+        case 0x214: return &g_p_tile.dma.write_dar_low;
+        case 0x218: return &g_p_tile.dma.write_dar_high;
+        case 0x060: return &g_p_tile.dma.write_done_imwr_low;
+        case 0x064: return &g_p_tile.dma.write_done_imwr_high;
+        case 0x070: return &g_p_tile.dma.write_imwr_data;
+        case 0x308: return &g_p_tile.dma.read_transfer_size;
+        case 0x30c: return &g_p_tile.dma.read_sar_low;
+        case 0x310: return &g_p_tile.dma.read_sar_high;
+        case 0x314: return &g_p_tile.dma.read_dar_low;
+        case 0x0cc: return &g_p_tile.dma.read_done_imwr_low;
+        case 0x0d0: return &g_p_tile.dma.read_done_imwr_high;
+        case 0x0dc: return &g_p_tile.dma.read_imwr_data;
+        case 0x00c: return &g_p_tile.dma.write_engine_en;
+        case 0x010: return &g_p_tile.dma.write_doorbell;
+        case 0x054: return &g_p_tile.dma.write_int_mask;
+        case 0x068: return &g_p_tile.dma.write_abort_imwr_low;
+        case 0x06c: return &g_p_tile.dma.write_abort_imwr_high;
+        case 0x200: return &g_p_tile.dma.write_control1;
+        case 0x210: return &g_p_tile.dma.write_sar_high;
+        case 0x02c: return &g_p_tile.dma.read_engine_en;
+        case 0x030: return &g_p_tile.dma.read_doorbell;
+        case 0x0a8: return &g_p_tile.dma.read_int_mask;
+        case 0x0d4: return &g_p_tile.dma.read_abort_imwr_low;
+        case 0x0d8: return &g_p_tile.dma.read_abort_imwr_high;
+        case 0x300: return &g_p_tile.dma.read_control1;
+        case 0x318: return &g_p_tile.dma.read_dar_high;
+#elif TT_ARCH_VERSION == 1
+        case 0x100: return &g_p_tile.dma.read_engine_en;
+        case 0x104: return &g_p_tile.dma.read_doorbell;
+        case 0x11C: return &g_p_tile.dma.read_transfer_size;
+        case 0x120: return &g_p_tile.dma.read_sar_low;
+        case 0x124: return &g_p_tile.dma.read_sar_high;
+        case 0x128: return &g_p_tile.dma.read_dar_low;
+        case 0x12C: return &g_p_tile.dma.read_dar_high;
+        case 0x188: return &g_p_tile.dma.read_int_setup;
+        case 0x190: return &g_p_tile.dma.read_msi_stop_low;
+        case 0x194: return &g_p_tile.dma.read_msi_stop_high;
+        case 0x1A0: return &g_p_tile.dma.read_msi_abort_low;
+        case 0x1A4: return &g_p_tile.dma.read_msi_abort_high;
+        case 0x1A8: return &g_p_tile.dma.read_msi_msgd;
+#endif
+        default: TTSIM_ERROR(UnimplementedFunctionality, "offset=0x%x", offset);
+    }
+}
+
+static void dma_read_engine() { // H2D
+    uint32_t size = g_p_tile.dma.read_transfer_size;
+    TTSIM_VERIFY(size && !(size & 3), UndefinedBehavior, "size=%d", size);
+    TTSIM_VERIFY(!(g_p_tile.dma.read_dar_low & 3), UndefinedBehavior, "misaligned device address=0x%x", g_p_tile.dma.read_dar_low);
+    TTSIM_VERIFY(!g_p_tile.dma.read_dar_high, UnimplementedFunctionality, "64-bit device address: dar_high=0x%x", g_p_tile.dma.read_dar_high);
+    uint64_t host_src = uint64_t(g_p_tile.dma.read_sar_low) | (uint64_t(g_p_tile.dma.read_sar_high) << 32);
+    uint32_t dev_dst = g_p_tile.dma.read_dar_low;
+    uint8_t dma_buffer[DMA_BUFFER_SIZE];
+    for (uint32_t off = 0; off < size;) {
+        uint32_t chunk = (size - off < DMA_BUFFER_SIZE) ? size - off : DMA_BUFFER_SIZE;
+        libttsim_pci_dma_mem_rd_bytes(host_src + off, dma_buffer, chunk);
+        tlb_window_write(dev_dst + off, dma_buffer, chunk);
+        off += chunk;
+    }
+#if TT_ARCH_VERSION == 0
+    // signal completion via imwr write into sysmem
+    uint64_t rd_done_addr = uint64_t(g_p_tile.dma.read_done_imwr_low) | (uint64_t(g_p_tile.dma.read_done_imwr_high) << 32);
+    libttsim_pci_dma_mem_wr_bytes(rd_done_addr, &g_p_tile.dma.read_imwr_data, 4);
+#else
+    g_p_tile.dma.read_transfer_size = 0; // signal completion
+#endif
+}
+
+#if TT_ARCH_VERSION == 0
+static void dma_write_engine() { // D2H
+    uint32_t size = g_p_tile.dma.write_transfer_size;
+    TTSIM_VERIFY(size && !(size & 3), UndefinedBehavior, "size=%d", size);
+    TTSIM_VERIFY(!(g_p_tile.dma.write_sar_low & 3), UndefinedBehavior, "misaligned device address=0x%x", g_p_tile.dma.write_sar_low);
+    TTSIM_VERIFY(!g_p_tile.dma.write_sar_high, UnimplementedFunctionality, "64-bit device address: sar_high=0x%x", g_p_tile.dma.write_sar_high);
+    uint64_t host_dst = uint64_t(g_p_tile.dma.write_dar_low) | (uint64_t(g_p_tile.dma.write_dar_high) << 32);
+    uint32_t dev_src = g_p_tile.dma.write_sar_low;
+    uint8_t dma_buffer[DMA_BUFFER_SIZE];
+    for (uint32_t off = 0; off < size;) {
+        uint32_t chunk = (size - off < DMA_BUFFER_SIZE) ? size - off : DMA_BUFFER_SIZE;
+        tlb_window_read(dev_src + off, dma_buffer, chunk);
+        libttsim_pci_dma_mem_wr_bytes(host_dst + off, dma_buffer, chunk);
+        off += chunk;
+    }
+    // signal completion
+    uint64_t wr_done_addr = uint64_t(g_p_tile.dma.write_done_imwr_low) | (uint64_t(g_p_tile.dma.write_done_imwr_high) << 32);
+    libttsim_pci_dma_mem_wr_bytes(wr_done_addr, &g_p_tile.dma.write_imwr_data, 4);
+}
+#endif
+
+// Match the access against p_tile's host-programmed BAR0/2/4, which decode only while Command.MSE (bit 1) is set.
+static bool pcie_bar_decode(const PcieTile *p_tile, uint64_t paddr, uint32_t size, uint32_t *p_bar, uint64_t *p_offset) {
+    if (!(p_tile->pci_cfg_command_status & 2)) {
+        return false;
+    }
+    const uint64_t bar_base[3] = {
+        (uint64_t(p_tile->pci_cfg_bar0_hi) << 32) | (p_tile->pci_cfg_bar0_lo & ~0xFu),
+        (uint64_t(p_tile->pci_cfg_bar2_hi) << 32) | (p_tile->pci_cfg_bar2_lo & ~0xFu),
+        (uint64_t(p_tile->pci_cfg_bar4_hi) << 32) | (p_tile->pci_cfg_bar4_lo & ~0xFu)};
+    const uint64_t bar_size[3] = {BAR0_SIZE, BAR2_SIZE, BAR4_SIZE};
+    uint32_t hit = 3;
+    for (uint32_t i = 0; i < 3; i++) {
+        if (((paddr - bar_base[i]) < bar_size[i]) || ((bar_base[i] - paddr) < size)) {
+            TTSIM_VERIFY(hit == 3, UndefinedBehavior, "paddr=0x%llx size=%d hits bar%u and bar%u", paddr, size, 2 * hit, 2 * i);
+            hit = i;
+        }
+    }
+    if (hit == 3) {
+        return false;
+    }
+    uint64_t offset = paddr - bar_base[hit];
+    TTSIM_VERIFY((offset < bar_size[hit]) && (size <= (bar_size[hit] - offset)), UndefinedBehavior,
+        "bar%u overrun: paddr=0x%llx size=%d", 2 * hit, paddr, size);
+    *p_bar = 2 * hit;
+    *p_offset = offset;
+    return true;
+}
+
+uint32_t pcie_device_from_paddr(uint64_t paddr, uint32_t size) {
+    uint32_t device = NUM_MMIO_CHIPS;
+    for (uint32_t d = 0; d < NUM_MMIO_CHIPS; d++) {
+        uint32_t bar;
+        uint64_t offset;
+        if (pcie_bar_decode(&g_chips[d].p_tile, paddr, size, &bar, &offset)) {
+            TTSIM_VERIFY(device == NUM_MMIO_CHIPS, UndefinedBehavior, "paddr=0x%llx size=%d hits device %u and device %u", paddr, size, device, d);
+            device = d;
+        }
+    }
+    TTSIM_VERIFY(device < NUM_MMIO_CHIPS, UndefinedBehavior, "paddr=0x%llx size=%d", paddr, size);
+    return device;
+}
+
+static void pcie_bar0_rd(uint32_t offset, void *p, uint32_t size) {
+    switch (offset) {
+#if TT_ARCH_VERSION == 0
+        case 0x00000000 ... 0x1EFFFFFF:
+#elif TT_ARCH_VERSION == 1
+        case 0x00000000 ... 0x193FFFFF:
+#endif
+        {
+            tlb_window_read(offset, p, size);
+            break;
+        }
+#if TT_ARCH_VERSION == 1
+        case PCIE_NIU0_BASE ... PCIE_NIU0_LIMIT:
+        case PCIE_NIU1_BASE ... PCIE_NIU1_LIMIT: {
+            TTSIM_VERIFY((size == 4) && !(offset & 3), UndefinedBehavior, "pcie_niu: offset=0x%x size=%d", offset, size);
+            uint32_t noc = (offset >= PCIE_NIU1_BASE);
+            mem_wr<uint32_t>(p, pcie_niu_rd32(noc, offset - (noc ? PCIE_NIU1_BASE : PCIE_NIU0_BASE)));
+            break;
+        }
+#elif TT_ARCH_VERSION == 0
+        case ARC_BAR0_CSM_BASE ... ARC_BAR0_CSM_LIMIT: {
+            uint32_t csm_offset = offset - ARC_BAR0_CSM_BASE;
+            tile_rd_bytes(ARC_COORD, ARC_NOC_CSM_BASE + csm_offset, p, size);
+            break;
+        }
+        case ARC_BAR0_APB_BASE ... ARC_BAR0_APB_LIMIT: {
+            uint32_t apb_offset = offset - ARC_BAR0_APB_BASE;
+            tile_rd_bytes(ARC_COORD, ARC_NOC_APB_BASE + apb_offset, p, size);
+            break;
+        }
+#endif
+        default:
+            TTSIM_ERROR(UnimplementedFunctionality, "bar0: offset=0x%x size=%d", offset, size);
+    }
+}
+
+static void pcie_bar2_rd(uint32_t offset, void *p, uint32_t size) {
+    TTSIM_VERIFY(size == 4, UnsupportedFunctionality, "bar2: size=%d", size);
+    TTSIM_VERIFY(!(offset & 3), UnsupportedFunctionality, "bar2: misaligned offset=0x%x", offset);
+    switch (offset) {
+#if TT_ARCH_VERSION == 0
+        case 0x0 ... IATU_BASE - 1:
+            mem_wr<uint32_t>(p, *dma_reg_ptr(offset));
+            break;
+#elif TT_ARCH_VERSION == 1
+        case DMA_RDCH0_BASE ... DMA_RDCH0_LIMIT:
+            mem_wr<uint32_t>(p, *dma_reg_ptr(offset));
+            break;
+#endif
+        case IATU_BASE ... IATU_LIMIT:
+            mem_wr<uint32_t>(p, *iatu_reg_field(offset - IATU_BASE));
+            break;
+        default:
+            TTSIM_ERROR(UnimplementedFunctionality, "bar2: offset=0x%x size=%d", offset, size);
+    }
+}
+
+static void pcie_bar4_rd(uint64_t offset, void *p, uint32_t size) {
+#if TT_ARCH_VERSION == 0
+    pcie_bar0_rd(BAR4_SOC_OFFSET + offset, p, size);
+#elif TT_ARCH_VERSION == 1
+    auto [coord, addr] = tlb_translate_bar4(offset, size);
+    tile_rd_bytes(coord, addr, p, size);
+#endif
+}
+
+// Worker for the currently-selected chip. The device-routing wrapper in libttsim.cpp selects
+// the chip from the host physical address.
+void pcie_mem_rd_bytes(uint64_t paddr, void *p, uint32_t size) {
+    TTSIM_VERIFY(size, UndefinedBehavior, "size=%d", size);
+    uint32_t bar;
+    uint64_t offset;
+    TTSIM_VERIFY(pcie_bar_decode(&g_p_tile, paddr, size, &bar, &offset), UndefinedBehavior,
+        "paddr=0x%llx size=%d command=0x%x", paddr, size, g_p_tile.pci_cfg_command_status);
+    switch (bar) {
+        case 0: pcie_bar0_rd(offset, p, size); break;
+        case 2: pcie_bar2_rd(offset, p, size); break;
+        case 4: pcie_bar4_rd(offset, p, size); break;
+    }
+}
+
+#if TT_ARCH_VERSION == 0
+static void tlb_cfg_wr64(uint32_t tlb_offset, uint64_t data) {
+    uint32_t index = tlb_offset / 8;
+    TTSIM_VERIFY(index < std::size(g_p_tile.tlb_cfg), AssertionFailure, "index=%d", index);
+    g_p_tile.tlb_cfg[index] = data;
+}
+
+static void tlb_cfg_wr32(uint32_t tlb_offset, uint32_t data) {
+    uint32_t index = tlb_offset / 8;
+    TTSIM_VERIFY(index < std::size(g_p_tile.tlb_cfg), AssertionFailure, "index=%d", index);
+    if (tlb_offset & 4) {
+        g_p_tile.tlb_cfg[index] = (g_p_tile.tlb_cfg[index] & 0xFFFFFFFFull) | (uint64_t(data) << 32);
+    } else {
+        g_p_tile.tlb_cfg[index] = (g_p_tile.tlb_cfg[index] & 0xFFFFFFFF00000000ull) | data;
+    }
+}
+#elif TT_ARCH_VERSION == 1
+static void tlb_cfg_wr32(uint32_t index, uint32_t data) {
+    TTSIM_VERIFY(index < std::size(g_p_tile.tlb_cfg), AssertionFailure, "index=%d", index);
+    g_p_tile.tlb_cfg[index] = data;
+}
+#endif
+
+static void pcie_bar0_wr(uint32_t offset, const void *p, uint32_t size) {
+    switch (offset) {
+#if TT_ARCH_VERSION == 0
+        case 0x00000000 ... 0x1EFFFFFF:
+#elif TT_ARCH_VERSION == 1
+        case 0x00000000 ... 0x193FFFFF:
+#endif
+        {
+            tlb_window_write(offset, p, size);
+            break;
+        }
+#if TT_ARCH_VERSION == 0
+        case 0x1FC00000 ... 0x1FC005CF: {
+            TTSIM_VERIFY(!(offset & (size - 1)), UnsupportedFunctionality, "bar0: misaligned offset=0x%x size=%d", offset, size);
+            uint32_t tlb_offset = offset - 0x1FC00000;
+            if (size == 8) {
+                tlb_cfg_wr64(tlb_offset, mem_rd<uint64_t>(p));
+            } else if (size == 4) {
+                tlb_cfg_wr32(tlb_offset, mem_rd<uint32_t>(p));
+            } else {
+                TTSIM_ERROR(UnsupportedFunctionality, "tlb_cfg: size=%d", size);
+            }
+            break;
+        }
+        case ARC_BAR0_CSM_BASE ... ARC_BAR0_CSM_LIMIT: {
+            uint32_t csm_offset = offset - ARC_BAR0_CSM_BASE;
+            tile_wr_bytes(ARC_COORD, ARC_NOC_CSM_BASE + csm_offset, p, size);
+            break;
+        }
+        case ARC_BAR0_APB_BASE ... ARC_BAR0_APB_LIMIT: {
+            uint32_t apb_offset = offset - ARC_BAR0_APB_BASE;
+            tile_wr_bytes(ARC_COORD, ARC_NOC_APB_BASE + apb_offset, p, size);
+            break;
+        }
+#elif TT_ARCH_VERSION == 1
+        case 0x1FC00000 ... 0x1FC009D4:
+            TTSIM_VERIFY(!(offset & 3), UnsupportedFunctionality, "bar0: misaligned offset=0x%x", offset);
+            TTSIM_VERIFY(size == 4, UnsupportedFunctionality, "bar0: offset=0x%x size=%d", offset, size);
+            tlb_cfg_wr32((offset - 0x1FC00000) / 4, mem_rd<uint32_t>(p));
+            break;
+#endif
+        default:
+            TTSIM_ERROR(UnimplementedFunctionality, "bar0: offset=0x%x size=%d", offset, size);
+    }
+}
+
+static void pcie_bar2_wr(uint32_t offset, const void *p, uint32_t size) {
+    TTSIM_VERIFY(size == 4, UnsupportedFunctionality, "bar2: size=%d", size);
+    TTSIM_VERIFY(!(offset & 3), UnsupportedFunctionality, "bar2: misaligned offset=0x%x", offset);
+    switch (offset) {
+#if TT_ARCH_VERSION == 0
+        case 0x0 ... IATU_BASE - 1: {
+            uint32_t value = mem_rd<uint32_t>(p);
+            *dma_reg_ptr(offset) = value;
+            if ((offset == 0x10) || (offset == 0x30)) {
+                // The doorbell value selects the DMA channel; only channel 0 is modeled.
+                TTSIM_VERIFY(!value, UnimplementedFunctionality, "bar2: DMA doorbell channel=%u", value);
+                if (offset == 0x10) { // DMA_WRITE_DOORBELL: device -> host
+                    dma_write_engine();
+                } else { // DMA_READ_DOORBELL: host -> device
+                    dma_read_engine();
+                }
+            }
+            break;
+        }
+#elif TT_ARCH_VERSION == 1
+        case DMA_RDCH0_BASE ... DMA_RDCH0_LIMIT: {
+            uint32_t value = mem_rd<uint32_t>(p);
+            *dma_reg_ptr(offset) = value;
+            if (offset == 0x104) { // ring doorbell: host -> device
+                TTSIM_VERIFY(value == 1, UnimplementedFunctionality, "bar2: DMA doorbell=0x%x", value);
+                dma_read_engine();
+            }
+            break;
+        }
+#endif
+        case IATU_BASE ... IATU_LIMIT: {
+            uint32_t iatu_offset = offset - IATU_BASE;
+            uint32_t value = mem_rd<uint32_t>(p);
+            *iatu_reg_field(iatu_offset) = value;
+            verify_iatu_region_write(iatu_offset, value);
+            break;
+        }
+        default:
+            TTSIM_ERROR(UnimplementedFunctionality, "bar2: offset=0x%x size=%d", offset, size);
+    }
+}
+
+static void pcie_bar4_wr(uint64_t offset, const void *p, uint32_t size) {
+#if TT_ARCH_VERSION == 0
+    pcie_bar0_wr(BAR4_SOC_OFFSET + offset, p, size);
+#else
+    auto [coord, addr] = tlb_translate_bar4(offset, size);
+    tile_wr_bytes(coord, addr, p, size);
+#endif
+}
+
+void pcie_mem_wr_bytes(uint64_t paddr, const void *p, uint32_t size) {
+    uint32_t bar;
+    uint64_t offset;
+    TTSIM_VERIFY(pcie_bar_decode(&g_p_tile, paddr, size, &bar, &offset), UndefinedBehavior,
+        "paddr=0x%llx size=%d command=0x%x", paddr, size, g_p_tile.pci_cfg_command_status);
+    switch (bar) {
+        case 0: pcie_bar0_wr(offset, p, size); break;
+        case 2: pcie_bar2_wr(offset, p, size); break;
+        case 4: pcie_bar4_wr(offset, p, size); break;
+        default: TTSIM_ASSERT(!"invalid bar");
+    }
+}

@@ -36,6 +36,9 @@ struct Rv64HartState {
     uint64_t mstatus;
     uint64_t mie;
     uint64_t mtvec;
+    uint64_t mepc;
+    uint64_t mcause;
+    bool rocc_irq; // mstatus.MIE && mie's RoCC bit && a pending bit in one of its buffers
 
     uint8_t *p_sram;
     uint32_t sram_size;
@@ -268,6 +271,8 @@ struct TensixState {
     uint32_t packer_tpg_z[4];
     uint32_t packer_dst_addr[4];
     uint32_t packer_dst_exp_addr[4];
+    bool mailbox_has_data[4][4]; // [writer][reader]
+    uint32_t mailbox_data[4][4]; // [writer][reader]
     TensixConfigState config[2];
 #if TT_ARCH_VERSION == 0
     CFG152_REG_UNION()
@@ -358,8 +363,6 @@ struct TensixTile {
     uint32_t trisc_reset_pc_override;
     uint32_t ncrisc_reset_pc;
     uint32_t ncrisc_reset_pc_override;
-    bool mailbox_has_data[4][4]; // [from][to]
-    uint32_t mailbox_data[4][4]; // [from][to]
 };
 
 struct EthTile {
@@ -595,6 +598,9 @@ uint32_t tensix_debug_array_rd32(const TensixState *p_tensix, uint32_t cmd);
 uint32_t tensix_dst_rd32(TensixState *p_tensix, uint32_t pipe, uint32_t offset);
 uint32_t tensix_tile_counter_rd32(TensixState *p_tensix, uint32_t counter, uint32_t index);
 void tensix_tile_counter_wr32(TensixState *p_tensix, uint32_t counter, uint32_t index, uint32_t data);
+void tile_counter_write_local(TensixState *p_tensix, uint32_t counter, uint32_t index, uint32_t data);
+void tc_remap_cross(uint32_t tile_id, uint32_t client, uint32_t counter, uint32_t index, uint32_t data);
+void tc_remap_check_view(uint32_t tile_id, uint32_t client, uint32_t counter, bool reset);
 bool tensix_decode_and_execute(TensixState *p_tensix, uint32_t pipe, uint32_t inst);
 
 uint32_t sfpu_mad(uint32_t a, uint32_t b, uint32_t c);

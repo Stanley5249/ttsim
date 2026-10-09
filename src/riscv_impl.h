@@ -1127,7 +1127,10 @@ static void RV_XLEN_PREFIX(ecall_ebreak)(RiscvHartState *p_hart, uint32_t inst) 
         TTSIM_ERROR(UnimplementedFunctionality, "ecall");
 #if XLEN == 64
     } else if (inst == 0x30200073) { // MRET
-        TTSIM_ERROR(UnimplementedFunctionality, "mret");
+        p_hart->pc = p_hart->mepc;
+        // MIE takes MPIE back, and MPIE is left set; MPP stays at machine mode, the only one there is
+        p_hart->mstatus = (p_hart->mstatus & ~uint64_t(0x8)) | ((p_hart->mstatus >> 4) & 0x8) | 0x80;
+        rocc_interrupt_update(p_hart->tile_id, p_hart->riscv_id);
     } else if (inst == 0xFC000073) {
         // tt.cache.cflush.d.l1 zero -- writes back and invalidates entire L1 D$ (src reg in bits 19:15)
     } else if (inst == 0xFC200073) {
@@ -1146,6 +1149,8 @@ static uint_xlen_t read_csr(RiscvHartState *p_hart, uint32_t csr) {
         case CSR_MSTATUS: return p_hart->mstatus;
         case CSR_MIE: return p_hart->mie;
         case CSR_MTVEC: return p_hart->mtvec;
+        case CSR_MEPC: return p_hart->mepc;
+        case CSR_MCAUSE: return p_hart->mcause;
         case CSR_MHARTID: return p_hart->riscv_id & 0x7FFFFFFF;
 #else
         case CSR_CFG0: return p_hart->chicken_bits;
@@ -1161,11 +1166,22 @@ static uint_xlen_t read_csr(RiscvHartState *p_hart, uint32_t csr) {
 static void write_csr(RiscvHartState *p_hart, uint32_t csr, uint_xlen_t data) {
     switch (csr) {
 #if XLEN == 64
-        case CSR_MSTATUS: // XXX only allow writes that don't change value for now
-            TTSIM_VERIFY(data == p_hart->mstatus, UnimplementedFunctionality, "mstatus: data=0x%llx", data);
+        case CSR_MSTATUS:
+            // Only the interrupt-enable stack and the previous privilege are meaningful here: with
+            // U/S/H unsupported there is nothing else in the register to drive.
+            TTSIM_VERIFY(!(data & ~uint64_t(0x1888)), UnimplementedFunctionality, "mstatus: data=0x%llx", data);
+            TTSIM_VERIFY((data & 0x1800) == 0x1800, UnimplementedFunctionality, "mstatus: data=0x%llx", data);
+            p_hart->mstatus = data;
+            rocc_interrupt_update(p_hart->tile_id, p_hart->riscv_id);
             break;
-        case CSR_MIE: // XXX only allow writes that don't change value for now
-            TTSIM_VERIFY(data == p_hart->mie, UnimplementedFunctionality, "mie: data=0x%llx", data);
+        case CSR_MIE:
+            // Only the line the tile's RoCC block raises: the other sources have no model yet.
+            TTSIM_VERIFY(!(data & ~(uint64_t(1) << ROCC_INTERRUPT_INDEX)), UnimplementedFunctionality, "mie: data=0x%llx", data);
+            p_hart->mie = data;
+            rocc_interrupt_update(p_hart->tile_id, p_hart->riscv_id);
+            break;
+        case CSR_MEPC:
+            p_hart->mepc = data;
             break;
         case CSR_MTVEC:
             // XXX how many address bits are implemented?

@@ -1399,10 +1399,14 @@ static void noc_cmd_ctrl(uint32_t tile_id, uint32_t noc_instance, uint32_t cmd_b
     uint32_t noc_ctrl = p_tile->noc_ctrl[noc_instance][cmd_buf];
     TTSIM_VERIFY((!bits<2,2>(noc_ctrl)), UnimplementedFunctionality, "byte enable writes");
     // ignore bit 6 for now (NOC_CMD_VC_LINKED) -- need error checks
-    // ignore bit 7 for now (NOC_CMD_VC_STATIC)
     TTSIM_VERIFY((!bits<9,9>(noc_ctrl)), UnimplementedFunctionality, "mem rd drop ack");
     TTSIM_VERIFY((!bits<12,10>(noc_ctrl)), UnsupportedFunctionality, "noc_ctrl=0x%x", noc_ctrl);
-    // ignore bits 15:13 for now (NOC_CMD_STATIC_VC)
+    if (bits<7,7>(noc_ctrl)) { // NOC_CMD_VC_STATIC
+        // bit 13 (buddy) only picks between a class's two VCs, which aren't modeled
+        uint32_t static_vc_class = bits<15,14>(noc_ctrl);
+        TTSIM_VERIFY((bits<5,5>(noc_ctrl) ? (static_vc_class == 2) : (static_vc_class <= 1)), UndefinedBehavior,
+            "static_vc_class=%d with noc_ctrl=0x%x", static_vc_class, noc_ctrl);
+    }
     TTSIM_VERIFY((!bits<16,16>(noc_ctrl)), UnimplementedFunctionality, "noc_ctrl=0x%x", noc_ctrl);
     TTSIM_VERIFY((!bits<26,18>(noc_ctrl)), UnsupportedFunctionality, "noc_ctrl=0x%x", noc_ctrl);
     TTSIM_VERIFY((!bits<30,27>(noc_ctrl)), UnimplementedFunctionality, "noc_ctrl=0x%x", noc_ctrl);
@@ -1905,28 +1909,32 @@ static void tensix_pc_buf_wr32(uint32_t tile_id, uint32_t riscv_id, uint32_t off
     }
 }
 
-// XXX we only allow a mailbox to have 1 value, when in reality it can have up to 4 values (though 4 slots shared across multiple mailboxes)
+// XXX only provides one message per writer and reader, where the hardware queues them in a pool per writer; SW that
+// queues a second message for a reader before the first is read stalls here where the hardware would not
 // XXX we don't implement the query whether the mailbox has data in it
-static std::pair<bool, uint32_t> tensix_mailbox_rd32(uint32_t tile_id, uint32_t riscv_id, uint32_t instance, uint32_t offset) {
-    TensixTile *p_tile = &g_t_tiles[tile_id];
-    TTSIM_VERIFY(!offset, UnimplementedFunctionality, "offset=0x%x", offset);
+static std::pair<TensixState *, uint32_t> tensix_mailbox_party(uint32_t tile_id, uint32_t riscv_id) {
     TTSIM_VERIFY(riscv_id < 4, UndefinedBehavior, "riscv_id=%d", riscv_id); // note that NCRISC cannot use the mailboxes
-    if (!p_tile->mailbox_has_data[instance][riscv_id]) {
+    return {&g_t_tiles[tile_id].tensix[0], riscv_id};
+}
+
+static std::pair<bool, uint32_t> tensix_mailbox_rd32(uint32_t tile_id, uint32_t riscv_id, uint32_t instance, uint32_t offset) {
+    TTSIM_VERIFY(!offset, UnimplementedFunctionality, "offset=0x%x", offset);
+    auto [p_tensix, reader] = tensix_mailbox_party(tile_id, riscv_id);
+    if (!p_tensix->mailbox_has_data[instance][reader]) {
         return {false, 0};
     }
-    p_tile->mailbox_has_data[instance][riscv_id] = false;
-    return {true, p_tile->mailbox_data[instance][riscv_id]};
+    p_tensix->mailbox_has_data[instance][reader] = false;
+    return {true, p_tensix->mailbox_data[instance][reader]};
 }
 
 static bool tensix_mailbox_wr32(uint32_t tile_id, uint32_t riscv_id, uint32_t instance, uint32_t offset, uint32_t data) {
-    TensixTile *p_tile = &g_t_tiles[tile_id];
     TTSIM_VERIFY(!offset, UnimplementedFunctionality, "offset=0x%x", offset);
-    TTSIM_VERIFY(riscv_id < 4, UndefinedBehavior, "riscv_id=%d", riscv_id); // note that NCRISC cannot use the mailboxes
-    if (p_tile->mailbox_has_data[riscv_id][instance]) {
+    auto [p_tensix, writer] = tensix_mailbox_party(tile_id, riscv_id);
+    if (p_tensix->mailbox_has_data[writer][instance]) {
         return false;
     }
-    p_tile->mailbox_has_data[riscv_id][instance] = true;
-    p_tile->mailbox_data[riscv_id][instance] = data;
+    p_tensix->mailbox_has_data[writer][instance] = true;
+    p_tensix->mailbox_data[writer][instance] = data;
     return true;
 }
 
