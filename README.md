@@ -17,16 +17,16 @@ and Linux/aarch64 are also provided via [GitHub Releases](https://github.com/ten
 Quasar is pre-silicon and ships as a binary only.
 
 ## Chip Status
-- **Wormhole/Blackhole**: Nearing feature complete, with a small number of remaining features and
-  bugs under active debug. Can run many tt-metal, ttnn, tt-forge, and LLK examples/tests.
+- **Wormhole/Blackhole**: Feature complete and production quality. Can run many tt-metal, ttnn,
+  tt-forge, and LLK examples/tests, as well as entire LLMs and other AI models.
 
 - **Wormhole/Blackhole multichip**: `wh_x2` (N300), `wh_x8` (T3000/LoudBox), `wh_x32` (WH Galaxy),
   `bh_x2` (P300), `bh_x4` (two P300 cards), and `bh_x32` (BH Galaxy) configs are available, with
   significant numbers of Ethernet, multidevice, and fabric tests passing.
 
-- **Quasar**: DM cores and TRISCs can be taken out of reset. RV32/64 code and simple NOC transfers
-  work. Some basic Tensix SFPU, packer, and unpacker functionality works. More tests and features
-  are under active debug and bringup.
+- **Quasar**: Approaching feature complete and now alpha quality for slow dispatch mode. Some features
+  remain, but the bulk of core Tensix and DM functionality is present and well tested. Can run many
+  tt-metal, ttnn, and LLK examples/tests, with multiple AI model bringups actively underway.
 
 ## Getting Started
 
@@ -243,11 +243,6 @@ WH Galaxy, and BH Galaxy and not only pass but also dispatch work to all chips i
 `tests/ttnn/unit_tests/base_functionality/test_multi_device.py::test_multi_device_single_op_binary`.
 The `bh_x32` binary is x86_64 only at present due to aarch64 linker limitations with the extremely large
 BSS segment this requires.
-
-Quasar support is in early stages and testing is incomplete. The unit_tests_legacy test listed
-above was validated against tt-metal with `#define NOC_API_V2` commented out in
-`tt_metal/hw/inc/internal/tt-2xx/quasar/noc_nonblocking_api.h`. Most QSR tests, including this one,
-currently require disabling `NOC_API_V2`.
 
 Not all hardware features are implemented, and the simulator is intentionally more restrictive than silicon
 to help uncover potential issues. Simulator error messages are grouped into the following categories
