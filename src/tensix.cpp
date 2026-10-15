@@ -14,6 +14,7 @@
 
 void tensix_init(TensixState *p_tensix, uint32_t tile_id, uint32_t tensix_id) {
     memset(p_tensix, 0, sizeof(TensixState));
+    memset(p_tensix->sem_max, 15, sizeof(p_tensix->sem_max));
     p_tensix->tile_id = tile_id;
     p_tensix->tensix_id = tensix_id;
     for (uint32_t row = 0; row < DST_ROWS; row++) {
@@ -136,7 +137,11 @@ static void mop_expander(TensixState *p_tensix, uint32_t pipe, uint32_t inst) {
     uint32_t outer_loop_len = p_tensix->mop_cfg[pipe][0];
     TTSIM_VERIFY((outer_loop_len >= 1) && (outer_loop_len <= 32), UnimplementedFunctionality, "outer_loop_len=%d", outer_loop_len);
     uint32_t inner_loop_len = p_tensix->mop_cfg[pipe][1];
-    TTSIM_VERIFY((inner_loop_len >= 1) && (inner_loop_len <= 64), UnimplementedFunctionality, "inner_loop_len=%d", inner_loop_len);
+#if TT_ARCH_VERSION >= 1
+    TTSIM_VERIFY((inner_loop_len >= 1) && (inner_loop_len <= 128), UnimplementedFunctionality, "inner_loop_len=%d", inner_loop_len);
+#else
+    TTSIM_VERIFY((inner_loop_len >= 1) && (inner_loop_len <= 127), UnsupportedFunctionality, "inner_loop_len=%d", inner_loop_len);
+#endif
     uint32_t start_op = p_tensix->mop_cfg[pipe][2];
     uint32_t end_op0 = p_tensix->mop_cfg[pipe][3];
     uint32_t end_op1 = p_tensix->mop_cfg[pipe][4];
@@ -3919,9 +3924,8 @@ TENSIX_EXECUTE_SFPLUT() {
     for_each_lane(mask, [=](uint32_t lane) {
         uint32_t l3 = p_tensix->l_regs[3][lane];
         uint32_t b = l3 & 0x7FFFFFFF; // absolute value
-        uint32_t coeffs = (b < 0x3F800000) ? p_tensix->l_regs[0][lane] :
-                          (b < 0x40000000) ? p_tensix->l_regs[1][lane] :
-                          p_tensix->l_regs[2][lane];
+        uint32_t i = (b < 0x3F800000) ? 0 : (b < 0x40000000) ? 1 : 2;
+        uint32_t coeffs = p_tensix->l_regs[0 + i][lane];
         uint32_t a = lut8_to_fp32(bits<15,8>(coeffs));
         uint32_t c = lut8_to_fp32(bits<7,0>(coeffs));
         uint32_t d = sfpu_mad(a, b, c);
@@ -4498,7 +4502,8 @@ TENSIX_EXECUTE_SFP_STOCH_RND() {
     TTSIM_VERIFY((instr_mod1 <= 7) || (instr_mod1 == 12) || (instr_mod1 == 13), UndefinedBehavior, "instr_mod1=%d", instr_mod1);
     TTSIM_VERIFY((instr_mod1 == 1) || (instr_mod1 == 2) || (instr_mod1 == 3) || (instr_mod1 == 6) || (instr_mod1 == 7),
         UnimplementedFunctionality, "instr_mod1=%d", instr_mod1);
-    // XXX check lreg_src_b == 9?
+    // XXX tighten this to lreg_src_b == 9
+    TTSIM_VERIFY(!lreg_src_b || (lreg_src_b == 9), UnsupportedFunctionality, "lreg_src_b=%d", lreg_src_b);
 
     uint32_t mask = p_tensix->cc_en ? p_tensix->cc : 0xFFFFFFFF;
     for_each_lane(mask, [=](uint32_t lane) {
@@ -4731,7 +4736,7 @@ TENSIX_EXECUTE_SFPSHFT2() {
             });
             break;
         }
-#if TT_ARCH_VERSION == 1
+#if TT_ARCH_VERSION >= 1
         case 4: {
             uint32_t vc[32];
             memcpy(vc, p_tensix->l_regs[lreg_src_c], sizeof(vc));

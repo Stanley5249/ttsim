@@ -1131,9 +1131,10 @@ static void RV_XLEN_PREFIX(ecall_ebreak)(RiscvHartState *p_hart, uint32_t inst) 
         // MIE takes MPIE back, and MPIE is left set; MPP stays at machine mode, the only one there is
         p_hart->mstatus = (p_hart->mstatus & ~uint64_t(0x8)) | ((p_hart->mstatus >> 4) & 0x8) | 0x80;
         rocc_interrupt_update(p_hart->tile_id, p_hart->riscv_id);
-    } else if (inst == 0xFC000073) {
-        // tt.cache.cflush.d.l1 zero -- writes back and invalidates entire L1 D$ (src reg in bits 19:15)
-    } else if (inst == 0xFC200073) {
+    } else if ((inst & 0xFFF07FFF) == 0xFC000073) { // tt.cache.cflush.d.l1
+        // Writes back and invalidates entire L1 D$ (rs1 = x0) or one line; this is a nop in this simulator
+    } else if ((inst & 0xFFF07FFF) == 0xFC200073) { // tt.cache.cdiscard.d.l1
+        // Invalidates entire L1 D$ (rs1 = x0) or one line without writing it back
         TTSIM_ERROR(UnsupportedFunctionality, "tt.cache.cdiscard.d.l1 use is discouraged and unlikely to be reliable");
 #endif
     } else {

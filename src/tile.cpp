@@ -1074,7 +1074,7 @@ static uint32_t riscv_debug_regs_rd32(uint32_t tile_id, uint32_t tensix_id, uint
     }
 }
 
-static void riscv_debug_regs_wr32(uint32_t tile_id, uint32_t tensix_id, uint32_t offset, uint32_t data) {
+[[nodiscard]] static bool riscv_debug_regs_wr32(uint32_t tile_id, uint32_t tensix_id, uint32_t offset, uint32_t data) {
     TensixTile *p_tile = &g_t_tiles[tile_id];
     switch (offset) {
         case RISCV_DEBUG_REGS_CG_CTRL_HYST0:
@@ -1154,6 +1154,7 @@ static void riscv_debug_regs_wr32(uint32_t tile_id, uint32_t tensix_id, uint32_t
         RISCV_DEBUG_REGS_WR_DEFAULT_CASES()
         default: TTSIM_ERROR(UndefinedBehavior, "offset=0x%x", offset);
     }
+    return true;
 }
 
 uint32_t remap_virtual_coordinate(const BaseTile *base_tile, uint32_t noc_instance, uint32_t coord) {
@@ -1885,7 +1886,7 @@ static std::pair<bool, uint32_t> tensix_pc_buf_rd32(uint32_t tile_id, uint32_t r
     }
 }
 
-static void tensix_pc_buf_wr32(uint32_t tile_id, uint32_t riscv_id, uint32_t offset, uint32_t data) {
+static bool tensix_pc_buf_wr32(uint32_t tile_id, uint32_t riscv_id, uint32_t offset, uint32_t data) {
     auto [tensix_id, pipe] = trisc_pipe(riscv_id);
     TensixTile *p_tile = &g_t_tiles[tile_id];
     TTSIM_VERIFY(!(offset & 3), AssertionFailure, "misaligned offset=0x%x", offset);
@@ -1895,18 +1896,20 @@ static void tensix_pc_buf_wr32(uint32_t tile_id, uint32_t riscv_id, uint32_t off
         case TENSIX_PC_BUF_SEMAPHORE(0) / 4 ... TENSIX_PC_BUF_SEMAPHORE(7) / 4: {
             uint32_t sem_index = (offset - TENSIX_PC_BUF_SEMAPHORE(0)) / 4;
             TTSIM_ASSERT(sem_index < std::size(p_tile->tensix[tensix_id].sem));
+            TensixState *p_tensix = &p_tile->tensix[tensix_id];
             if (data == 1) {
-                TTSIM_VERIFY(p_tile->tensix[tensix_id].sem[sem_index], NonContractualBehavior, "sem%d underflow", sem_index);
-                p_tile->tensix[tensix_id].sem[sem_index]--;
+                TTSIM_VERIFY(p_tensix->sem[sem_index], NonContractualBehavior, "sem%d underflow", sem_index);
+                p_tensix->sem[sem_index]--;
             } else {
                 TTSIM_VERIFY(!data, UnimplementedFunctionality, "sem%d: data=0x%x", sem_index, data);
-                TTSIM_VERIFY(p_tile->tensix[tensix_id].sem[sem_index] < 15, NonContractualBehavior, "sem%d overflow", sem_index);
-                p_tile->tensix[tensix_id].sem[sem_index]++;
+                TTSIM_VERIFY(p_tensix->sem[sem_index] < 15, NonContractualBehavior, "sem%d overflow", sem_index);
+                p_tensix->sem[sem_index]++;
             }
             break;
         }
         default: TTSIM_ERROR(UnimplementedFunctionality, "offset=0x%x", offset);
     }
+    return true;
 }
 
 // XXX only provides one message per writer and reader, where the hardware queues them in a pool per writer; SW that
@@ -2205,8 +2208,7 @@ static bool t_tile_mmio_wr32(uint32_t tile_id, uint32_t riscv_id, uint64_t addr,
             riscv_tdma_regs_wr32(tile_id, addr - RISCV_TDMA_REGS_BASE, data);
             return true;
         case RISCV_DEBUG_REGS_BASE ... RISCV_DEBUG_REGS_LIMIT:
-            riscv_debug_regs_wr32(tile_id, 0, addr - RISCV_DEBUG_REGS_BASE, data);
-            return true;
+            return riscv_debug_regs_wr32(tile_id, 0, addr - RISCV_DEBUG_REGS_BASE, data);
         case NOC0_REGS_BASE ... NOC0_REGS_LIMIT:
             noc_regs_wr32<'T'>(tile_id, 0, addr - NOC0_REGS_BASE, data);
             return true;
@@ -2236,8 +2238,7 @@ static bool t_tile_mmio_wr32(uint32_t tile_id, uint32_t riscv_id, uint64_t addr,
             tensix_inst_wr32(tile_id, riscv_id, 2, addr - TENSIX_INST2_BASE, data);
             return true;
         case TENSIX_PC_BUF_BASE ... TENSIX_PC_BUF_LIMIT:
-            tensix_pc_buf_wr32(tile_id, riscv_id, addr - TENSIX_PC_BUF_BASE, data);
-            return true;
+            return tensix_pc_buf_wr32(tile_id, riscv_id, addr - TENSIX_PC_BUF_BASE, data);
         case TENSIX_MAILBOX0_BASE ... TENSIX_MAILBOX0_LIMIT:
             return tensix_mailbox_wr32(tile_id, riscv_id, 0, addr - TENSIX_MAILBOX0_BASE, data);
         case TENSIX_MAILBOX1_BASE ... TENSIX_MAILBOX1_LIMIT:
