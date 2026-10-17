@@ -996,16 +996,26 @@ void rv64_sys_tt_attach(RvSystem *p_sys, const char *path) {
 
     // Probe BAR addresses and sizes
     for (uint32_t b = 0; b < 3; b++) {
-        uint32_t bar_off = 0x10 + 8*b; // 64-bit memory BARs
+        uint32_t bar_off = 0x10 + 8*b; // BAR0/2/4
         uint32_t lo = s_tt_cfg_rd(0, bar_off);
-        uint32_t hi = s_tt_cfg_rd(0, bar_off + 4);
+        bool is_64 = (lo & 0x6) == 0x4;
+        uint32_t hi = is_64 ? s_tt_cfg_rd(0, bar_off + 4) : 0;
         s_tt_cfg_wr(0, bar_off, 0xFFFFFFFFu);
-        s_tt_cfg_wr(0, bar_off + 4, 0xFFFFFFFFu);
-        uint64_t mask = (uint64_t(s_tt_cfg_rd(0, bar_off + 4)) << 32) | (s_tt_cfg_rd(0, bar_off) & ~0xFu);
+        if (is_64) {
+            s_tt_cfg_wr(0, bar_off + 4, 0xFFFFFFFFu);
+        }
+        uint64_t mask_hi = is_64 ? s_tt_cfg_rd(0, bar_off + 4) : 0xFFFFFFFFu;
+        uint64_t mask = (mask_hi << 32) | (s_tt_cfg_rd(0, bar_off) & ~0xFu);
         s_tt_cfg_wr(0, bar_off, lo); // restore the firmware assignment (probe-only keeps it)
-        s_tt_cfg_wr(0, bar_off + 4, hi);
+        if (is_64) {
+            s_tt_cfg_wr(0, bar_off + 4, hi);
+        }
         p_sys->tt_bar_base[b] = ((uint64_t(hi) << 32) | lo) & ~0xFull;
         p_sys->tt_bar_size[b] = ~mask + 1;
+        TTSIM_VERIFY((p_sys->tt_bar_base[b] >= p_sys->dram_base + p_sys->dram_size) ||
+            (p_sys->tt_bar_base[b] + p_sys->tt_bar_size[b] <= p_sys->dram_base), ConfigurationError,
+            "tt bar%u [0x%llx, 0x%llx) overlaps guest DRAM; reduce --mem-size", 2 * b, p_sys->tt_bar_base[b],
+            p_sys->tt_bar_base[b] + p_sys->tt_bar_size[b]);
     }
     p_sys->tt_active = true;
 }

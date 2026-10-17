@@ -6,18 +6,33 @@
 #include "sim.h"
 #include "pcie.h"
 
+#if TT_ARCH_VERSION == 0
+#define BAR0_BASE 0x100000000ull // 4GiB
+#define BAR2_BASE 0xC0000000ull // 3GiB: BAR2 is a 32-bit BAR
+#define BAR4_BASE 0x800000000ull // 32GiB
+
+#define BAR0_SIZE (512 * 1024*1024)
+#define BAR2_SIZE (1 * 1024*1024)
+#define BAR4_SIZE (32 * 1024*1024)
+#define REVISION_ID 1
+#elif TT_ARCH_VERSION == 1
 #define BAR0_BASE 0x100000000ull // 4GiB
 #define BAR2_BASE 0x120000000ull // 4GiB + 512MiB
 #define BAR4_BASE 0x800000000ull // 32GiB
 
 #define BAR0_SIZE (512 * 1024*1024)
 #define BAR2_SIZE (1 * 1024*1024)
-#if TT_ARCH_VERSION == 1
 #define BAR4_SIZE (32ull * 1024*1024*1024) // 32GiB
 #define REVISION_ID 0
 #else
-#define BAR4_SIZE (32 * 1024*1024)
-#define REVISION_ID 1
+#define BAR0_BASE 0x100000000ull // 4GiB
+#define BAR2_BASE 0x200000000ull // 8GiB
+#define BAR4_BASE 0x8000000000ull // 512GiB
+
+#define BAR0_SIZE (4ull * 1024*1024*1024) // 4GiB
+#define BAR2_SIZE (1 * 1024*1024)
+#define BAR4_SIZE (512ull * 1024*1024*1024) // 512GiB
+#define REVISION_ID 0 // XXX placeholder
 #endif
 
 #if TT_ARCH_VERSION == 0
@@ -144,11 +159,15 @@ void pcie_init() {
         // Each MMIO device's BARs live in its own host-physical window (see PER_DEVICE_PADDR_STRIDE).
         uint64_t off = uint64_t(d) * PER_DEVICE_PADDR_STRIDE;
         PcieTile *p_tile = &g_chips[d].p_tile;
-        p_tile->pci_cfg_bar0_lo = uint32_t(BAR0_BASE + off) | 0x4; // BAR0: 64-bit memory, not prefetchable
+        p_tile->pci_cfg_bar0_lo = uint32_t(BAR0_BASE + off) | 0xC; // BAR0: 64-bit memory, prefetchable
         p_tile->pci_cfg_bar0_hi = uint32_t((BAR0_BASE + off) >> 32);
-        p_tile->pci_cfg_bar2_lo = uint32_t(BAR2_BASE + off) | 0x4; // BAR2
+#if TT_ARCH_VERSION == 0
+        p_tile->pci_cfg_bar2_lo = uint32_t(BAR2_BASE + d * BAR2_SIZE); // BAR2: 32-bit memory, not prefetchable
+#else
+        p_tile->pci_cfg_bar2_lo = uint32_t(BAR2_BASE + off) | 0xC; // BAR2: 64-bit memory, prefetchable
         p_tile->pci_cfg_bar2_hi = uint32_t((BAR2_BASE + off) >> 32);
-        p_tile->pci_cfg_bar4_lo = uint32_t(BAR4_BASE + off) | 0x4; // BAR4
+#endif
+        p_tile->pci_cfg_bar4_lo = uint32_t(BAR4_BASE + off) | 0xC; // BAR4: 64-bit memory, prefetchable
         p_tile->pci_cfg_bar4_hi = uint32_t((BAR4_BASE + off) >> 32);
         p_tile->pci_cfg_command_status = 0x2; // memory space enabled, as left by firmware enumeration
         p_tile->pci_cfg_interrupt_line_pin = 0xFF; // interrupt line=0xFF, pin=0 (no INTx)
@@ -191,7 +210,11 @@ void pcie_config_wr32(uint32_t device, uint32_t offset, uint32_t data) {
         case 0x10: p_reg = &p_tile->pci_cfg_bar0_lo; write_mask = uint32_t(~(uint64_t(BAR0_SIZE) - 1)); break;
         case 0x14: p_reg = &p_tile->pci_cfg_bar0_hi; write_mask = uint32_t(~((uint64_t(BAR0_SIZE) - 1) >> 32)); break;
         case 0x18: p_reg = &p_tile->pci_cfg_bar2_lo; write_mask = uint32_t(~(uint64_t(BAR2_SIZE) - 1)); break;
+#if TT_ARCH_VERSION == 0
+        case 0x1C: return; // BAR3 is unimplemented
+#else
         case 0x1C: p_reg = &p_tile->pci_cfg_bar2_hi; write_mask = uint32_t(~((uint64_t(BAR2_SIZE) - 1) >> 32)); break;
+#endif
         case 0x20: p_reg = &p_tile->pci_cfg_bar4_lo; write_mask = uint32_t(~(uint64_t(BAR4_SIZE) - 1)); break;
         case 0x24: p_reg = &p_tile->pci_cfg_bar4_hi; write_mask = uint32_t(~((uint64_t(BAR4_SIZE) - 1) >> 32)); break;
         case 0x30: return; // expansion ROM is write-ignore

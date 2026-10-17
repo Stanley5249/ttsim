@@ -591,6 +591,8 @@ void rv64_step(Rv64HartState *p_hart);
 
 void tensix_init(TensixState *p_tensix, uint32_t tile_id, uint32_t tensix_id);
 bool tensix_can_push_inst(TensixState *p_tensix, uint32_t pipe);
+bool tensix_thread_idle(const TensixState *p_tensix, uint32_t pipe);
+bool tensix_mop_expander_idle(const TensixState *p_tensix, uint32_t pipe);
 void tensix_push_inst(TensixState *p_tensix, uint32_t pipe, uint32_t inst, bool bypass_mop_expander);
 uint32_t tensix_cfg_rd32(TensixState *p_tensix, uint32_t bank, uint32_t offset);
 void tensix_cfg_wr32(TensixState *p_tensix, uint32_t bank, uint32_t offset, uint32_t data);

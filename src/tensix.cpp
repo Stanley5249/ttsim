@@ -179,6 +179,16 @@ static void mop_expander(TensixState *p_tensix, uint32_t pipe, uint32_t inst) {
     }
 }
 
+// Whether every instruction this thread has pushed has finished executing
+bool tensix_thread_idle(const TensixState *p_tensix, uint32_t pipe) {
+    return p_tensix->inst_rd_ptr[pipe] == p_tensix->inst_wr_ptr[pipe];
+}
+
+// Whether the thread's MOP Expander has finished expanding
+bool tensix_mop_expander_idle(const TensixState *p_tensix, uint32_t pipe) {
+    return true; // a MOP is expanded the moment it arrives
+}
+
 bool tensix_can_push_inst(TensixState *p_tensix, uint32_t pipe) {
     int32_t fifo_size = p_tensix->inst_wr_ptr[pipe] - p_tensix->inst_rd_ptr[pipe];
     if (fifo_size < 0) {
@@ -189,7 +199,8 @@ bool tensix_can_push_inst(TensixState *p_tensix, uint32_t pipe) {
 
 void tensix_push_inst(TensixState *p_tensix, uint32_t pipe, uint32_t inst, bool bypass_mop_expander) {
     if (bypass_mop_expander) {
-        return replay_expander(p_tensix, pipe, inst);
+        replay_expander(p_tensix, pipe, inst);
+        return;
     }
     uint32_t opcode = bits<31,24>(inst);
     switch (opcode) {
@@ -495,7 +506,7 @@ void tensix_cfg_wr32(TensixState *p_tensix, uint32_t bank, uint32_t offset, uint
 #endif
 }
 
-static inline uint32_t get_state_id(TensixState *p_tensix, uint32_t pipe) {
+static inline uint32_t get_state_id(const TensixState *p_tensix, uint32_t pipe) {
     return p_tensix->thread[pipe].CFG_STATE_ID_StateID;
 }
 

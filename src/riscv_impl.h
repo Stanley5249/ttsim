@@ -36,7 +36,7 @@
 
 // Full-system RV64 currently does not support bitmanip
 #define HAS_ZBA_ZBB (((TT_ARCH_VERSION >= 1) || (XLEN == 64)) && !TTSIM_RV64_SYSTEM)
-#define HAS_ZBC ((XLEN == 64) && !TTSIM_RV64_SYSTEM)
+#define HAS_ZBC 0 // no modeled core implements Zbc
 #define HAS_ZBS ((XLEN == 64) && !TTSIM_RV64_SYSTEM)
 #define HAS_PACK_BREV8 ((TT_ARCH_VERSION >= 1) && (XLEN == 32)) // small subset of Zbkb that is in BH babyrisc
 
@@ -1059,18 +1059,14 @@ static void RV_XLEN_PREFIX(fence)(RiscvHartState *p_hart, uint32_t inst) {
     // For future reference: PAUSE instruction appears to be 0x0100000F, i.e., fence_mode == 0x010
     // This is probably a safe NOP on silicon, but don't know for sure and don't know its performance
     // Can generate it via __builtin_riscv_pause()
-#if XLEN == 32
-    // 0xFF is invalidate_l1_cache() on BH; others are from std::atomic
-    if ((fence_mode == 0x023) || (fence_mode == 0x031) || (fence_mode == 0x033) || (fence_mode == 0x0FF)) {
-        return dcache_invalidate(p_hart); // all fences flush the D$
-    }
-#endif
-#if XLEN == 64
     if ((fence_mode == 0x011) || (fence_mode == 0x023) || (fence_mode == 0x031) || (fence_mode == 0x033) ||
         (fence_mode == 0x0FF)) {
-        return; // XXX cases seen so far
-    }
+#if XLEN == 32
+        return dcache_invalidate(p_hart); // all fences flush the D$
+#else
+        return;
 #endif
+    }
     TTSIM_ERROR(UnsupportedFunctionality, "fence_mode=0x%x", fence_mode);
 #endif
 }
@@ -1417,6 +1413,7 @@ static void RV_XLEN_PREFIX(custom_3)(RiscvHartState *p_hart, uint32_t inst) {
 #endif
 
 #if XLEN == 32
+
 static void RV_XLEN_PREFIX(tti)(RiscvHartState *p_hart, uint32_t inst) {
     TTSIM_VERIFY(p_hart->tile_type == 'T', UndefinedBehavior, "tile_type=%c", p_hart->tile_type);
     uint32_t riscv_id = p_hart->riscv_id;
@@ -1891,7 +1888,6 @@ void RV_XLEN_PREFIX(step)(RiscvHartState *p_hart) {
     } else {
 #if XLEN == 32
         RV_XLEN_PREFIX(tti)(p_hart, inst);
-        // XXX In BH, can dispatch up to 4 TTIs in one cycle in some cases
 #else
         p_hart->pc = pc + 2; // again, optimizes for the common case
         uint32_t opcode = (inst & 3) | (bits<15,13>(inst) << 2);

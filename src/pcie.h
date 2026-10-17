@@ -6,8 +6,9 @@
 #include <stdint.h>
 
 // Multi-MMIO host enumeration: each host-visible chip is a distinct PCI device with its own BAR
-// windows. Device i's BARs come up at the device-0 bases offset by i * PER_DEVICE_PADDR_STRIDE; the
-// stride exceeds every BAR's top (BH BAR4 ends at 64GiB), so default device ranges never overlap.
+// windows. Device i's 64-bit BARs come up at the device-0 bases offset by i * PER_DEVICE_PADDR_STRIDE,
+// which clears the top of every WH/BH 64-bit BAR (BH BAR4 ends at 64GiB). WH's 32-bit BAR2 instead
+// comes up at the device-0 base offset by i * BAR2_SIZE.
 // The host may relocate any BAR through config space, so accesses route by the programmed BARs.
 #define PER_DEVICE_PADDR_STRIDE 0x1000000000ull // 64GiB
 

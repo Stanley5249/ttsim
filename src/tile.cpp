@@ -1855,15 +1855,18 @@ static void tensix_regfile_wr32(uint32_t tile_id, uint32_t riscv_id, uint32_t of
 }
 
 // XXX we do not call tensix_can_push_inst in this path, so this can currently overflow the FIFO
-static void tensix_inst_wr32(uint32_t tile_id, uint32_t riscv_id, uint32_t pipe_aperture, uint32_t offset, uint32_t data) {
+[[nodiscard]] static bool tensix_inst_wr32(uint32_t tile_id, uint32_t riscv_id, uint32_t pipe_aperture, uint32_t offset,
+                                           uint32_t data) {
     TTSIM_VERIFY(!offset, UnimplementedFunctionality, "offset=0x%x", offset);
     TensixTile *p_tile = &g_t_tiles[tile_id];
     if (riscv_id == RV32_ID_BRISC) {
-        return tensix_push_inst(&p_tile->tensix[0], pipe_aperture, data, true); // bypasses MOP expander
+        tensix_push_inst(&p_tile->tensix[0], pipe_aperture, data, true); // bypasses MOP expander
+        return true;
     }
     TTSIM_VERIFY(!pipe_aperture, UnsupportedFunctionality, "TENSIX_INST%d aperture only mapped for brisc", pipe_aperture);
     auto [tensix_id, pipe] = trisc_pipe(riscv_id);
     tensix_push_inst(&p_tile->tensix[tensix_id], pipe, data, false);
+    return true;
 }
 
 static std::pair<bool, uint32_t> tensix_pc_buf_rd32(uint32_t tile_id, uint32_t riscv_id, uint32_t offset) {
@@ -1872,11 +1875,12 @@ static std::pair<bool, uint32_t> tensix_pc_buf_rd32(uint32_t tile_id, uint32_t r
     TTSIM_VERIFY(!(offset & 3), AssertionFailure, "misaligned offset=0x%x", offset);
     switch (offset / 4) {
         case TENSIX_PC_BUF_TENSIX_SYNC / 4:
-            if (p_tile->tensix[tensix_id].inst_rd_ptr[pipe] != p_tile->tensix[tensix_id].inst_wr_ptr[pipe]) {
+            if (!tensix_thread_idle(&p_tile->tensix[tensix_id], pipe)) {
                 return {false, 0}; // stall until previously issued Tensix instructions from this thread have finished
             }
             return {true, 0};
-        case TENSIX_PC_BUF_MOP_SYNC / 4: return {true, 0};
+        case TENSIX_PC_BUF_MOP_SYNC / 4:
+            return {tensix_mop_expander_idle(&p_tile->tensix[tensix_id], pipe), 0}; // stall until done expanding MOPs
         case TENSIX_PC_BUF_SEMAPHORE(0) / 4 ... TENSIX_PC_BUF_SEMAPHORE(7) / 4: {
             uint32_t sem_index = (offset - TENSIX_PC_BUF_SEMAPHORE(0)) / 4;
             TTSIM_ASSERT(sem_index < std::size(p_tile->tensix[tensix_id].sem));
@@ -2229,14 +2233,11 @@ static bool t_tile_mmio_wr32(uint32_t tile_id, uint32_t riscv_id, uint64_t addr,
             tensix_regfile_wr32(tile_id, riscv_id, addr - TENSIX_REGFILE_BASE, data);
             return true;
         case TENSIX_INST_BASE ... TENSIX_INST_LIMIT:
-            tensix_inst_wr32(tile_id, riscv_id, 0, addr - TENSIX_INST_BASE, data);
-            return true;
+            return tensix_inst_wr32(tile_id, riscv_id, 0, addr - TENSIX_INST_BASE, data);
         case TENSIX_INST1_BASE ... TENSIX_INST1_LIMIT:
-            tensix_inst_wr32(tile_id, riscv_id, 1, addr - TENSIX_INST1_BASE, data);
-            return true;
+            return tensix_inst_wr32(tile_id, riscv_id, 1, addr - TENSIX_INST1_BASE, data);
         case TENSIX_INST2_BASE ... TENSIX_INST2_LIMIT:
-            tensix_inst_wr32(tile_id, riscv_id, 2, addr - TENSIX_INST2_BASE, data);
-            return true;
+            return tensix_inst_wr32(tile_id, riscv_id, 2, addr - TENSIX_INST2_BASE, data);
         case TENSIX_PC_BUF_BASE ... TENSIX_PC_BUF_LIMIT:
             return tensix_pc_buf_wr32(tile_id, riscv_id, addr - TENSIX_PC_BUF_BASE, data);
         case TENSIX_MAILBOX0_BASE ... TENSIX_MAILBOX0_LIMIT:
