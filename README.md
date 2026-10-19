@@ -57,7 +57,7 @@ The included source can be built locally:
 ./make.py :build
 ```
 
-Requires g++ with C++20 support and Python 3.8+. Builds release `.so` files at
+Requires g++ with C++20 support and Python 3.9+. Builds release `.so` files at
 `src/_out/release_wh/libttsim.so` and `src/_out/release_bh/libttsim.so`, functionally
 equivalent to the corresponding GitHub Releases binaries (and byte-identical when built
 on the same toolchain as our release CI: `ubuntu-24.04` with its default g++).
