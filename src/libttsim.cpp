@@ -10,11 +10,68 @@
 
 #define API_EXPORT __attribute((visibility("default")))
 
+// Host-float results are exact only under the default FP environment (RNE, no FTZ/DAZ, exceptions masked), which
+// the host may have changed. Every entry point runs under it, and the host's environment is back in place whenever
+// the host runs: on return and in the DMA callbacks.
+#if defined(__x86_64__)
+#include <xmmintrin.h>
+using FpEnv = uint32_t; // MXCSR
+static constexpr FpEnv DEFAULT_FPENV = 0x1F80;
+static inline FpEnv fpenv_read() {
+    return _mm_getcsr();
+}
+static inline void fpenv_write(FpEnv env) {
+    _mm_setcsr(env);
+}
+#elif defined(__aarch64__)
+struct FpEnv {
+    uint64_t fpcr;
+    uint64_t fpsr;
+};
+static constexpr FpEnv DEFAULT_FPENV = {0, 0};
+static inline FpEnv fpenv_read() {
+    FpEnv env;
+    asm volatile("mrs %0, fpcr" : "=r"(env.fpcr) :: "memory");
+    asm volatile("mrs %0, fpsr" : "=r"(env.fpsr) :: "memory");
+    return env;
+}
+static inline void fpenv_write(FpEnv env) {
+    asm volatile("msr fpcr, %0" :: "r"(env.fpcr) : "memory");
+    asm volatile("msr fpsr, %0" :: "r"(env.fpsr) : "memory");
+}
+#elif defined(__riscv)
+using FpEnv = uint32_t; // fcsr
+static constexpr FpEnv DEFAULT_FPENV = 0;
+static inline FpEnv fpenv_read() {
+    FpEnv env;
+    asm volatile("frcsr %0" : "=r"(env) :: "memory");
+    return env;
+}
+static inline void fpenv_write(FpEnv env) {
+    asm volatile("fscsr %0" :: "r"(env) : "memory");
+}
+#else
+#error "unsupported host"
+#endif
+
+static FpEnv s_host_fpenv;
+
+struct FpEnvGuard {
+    FpEnvGuard() {
+        s_host_fpenv = fpenv_read();
+        fpenv_write(DEFAULT_FPENV);
+    }
+    ~FpEnvGuard() {
+        fpenv_write(s_host_fpenv);
+    }
+};
+
 static bool s_ttsim_running = false;
 static void (*s_pfn_libttsim_pci_dma_mem_rd_bytes)(uint64_t paddr, void *p, uint32_t size);
 static void (*s_pfn_libttsim_pci_dma_mem_wr_bytes)(uint64_t paddr, const void *p, uint32_t size);
 
 extern "C" API_EXPORT void libttsim_init() {
+    FpEnvGuard fpenv_guard;
     TTSIM_VERIFY(!s_ttsim_running, ConfigurationError, "sim is already running");
     ttsim_init();
     pcie_init();
@@ -22,6 +79,7 @@ extern "C" API_EXPORT void libttsim_init() {
 }
 
 extern "C" API_EXPORT void libttsim_exit() {
+    FpEnvGuard fpenv_guard;
     TTSIM_VERIFY(s_ttsim_running, ConfigurationError, "sim is not running");
     ttsim_exit();
     s_ttsim_running = false;
@@ -31,6 +89,7 @@ extern "C" API_EXPORT void libttsim_set_pci_dma_mem_callbacks(
     decltype(s_pfn_libttsim_pci_dma_mem_rd_bytes) pci_dma_mem_rd,
     decltype(s_pfn_libttsim_pci_dma_mem_wr_bytes) pci_dma_mem_wr
 ) {
+    FpEnvGuard fpenv_guard;
     TTSIM_VERIFY(!s_ttsim_running, ConfigurationError, "sim is already running");
     s_pfn_libttsim_pci_dma_mem_rd_bytes = pci_dma_mem_rd;
     s_pfn_libttsim_pci_dma_mem_wr_bytes = pci_dma_mem_wr;
@@ -51,6 +110,7 @@ static uint32_t pci_device_from_bdf(uint32_t bus_device_function) {
 }
 
 extern "C" API_EXPORT uint32_t libttsim_pci_config_rd32(uint32_t bus_device_function, uint32_t offset) {
+    FpEnvGuard fpenv_guard;
     TTSIM_VERIFY(s_ttsim_running, ConfigurationError, "sim is not running");
     TTSIM_VERIFY(!(offset & 3), UndefinedBehavior, "misaligned offset=0x%x", offset);
     uint32_t device = pci_device_from_bdf(bus_device_function);
@@ -61,6 +121,7 @@ extern "C" API_EXPORT uint32_t libttsim_pci_config_rd32(uint32_t bus_device_func
 }
 
 extern "C" API_EXPORT void libttsim_pci_config_wr32(uint32_t bus_device_function, uint32_t offset, uint32_t data) {
+    FpEnvGuard fpenv_guard;
     TTSIM_VERIFY(s_ttsim_running, ConfigurationError, "sim is not running");
     TTSIM_VERIFY(!(offset & 3), UndefinedBehavior, "misaligned offset=0x%x", offset);
     uint32_t device = pci_device_from_bdf(bus_device_function);
@@ -72,6 +133,7 @@ extern "C" API_EXPORT void libttsim_pci_config_wr32(uint32_t bus_device_function
 // Route a host physical access to the owning MMIO device's chip, then translate within
 // that device's BAR windows. For NUM_CHIPS==1 this is a straight passthrough.
 extern "C" API_EXPORT void libttsim_pci_mem_rd_bytes(uint64_t paddr, void *p, uint32_t size) {
+    FpEnvGuard fpenv_guard;
     TTSIM_VERIFY(s_ttsim_running, ConfigurationError, "sim is not running");
     TTSIM_VERIFY(size, UndefinedBehavior, "size=%d", size);
 #if NUM_CHIPS > 1
@@ -86,6 +148,7 @@ extern "C" API_EXPORT void libttsim_pci_mem_rd_bytes(uint64_t paddr, void *p, ui
 }
 
 extern "C" API_EXPORT void libttsim_pci_mem_wr_bytes(uint64_t paddr, const void *p, uint32_t size) {
+    FpEnvGuard fpenv_guard;
     TTSIM_VERIFY(s_ttsim_running, ConfigurationError, "sim is not running");
     TTSIM_VERIFY(size, UndefinedBehavior, "size=%d", size);
 #if NUM_CHIPS > 1
@@ -101,21 +164,29 @@ extern "C" API_EXPORT void libttsim_pci_mem_wr_bytes(uint64_t paddr, const void 
 
 void libttsim_pci_dma_mem_rd_bytes(uint64_t paddr, void *p, uint32_t size) {
     TTSIM_VERIFY(s_pfn_libttsim_pci_dma_mem_rd_bytes, ConfigurationError, "DMA read callback not installed");
+    fpenv_write(s_host_fpenv);
     s_pfn_libttsim_pci_dma_mem_rd_bytes(paddr, p, size);
+    s_host_fpenv = fpenv_read();
+    fpenv_write(DEFAULT_FPENV);
 }
 
 void libttsim_pci_dma_mem_wr_bytes(uint64_t paddr, const void *p, uint32_t size) {
     TTSIM_VERIFY(s_pfn_libttsim_pci_dma_mem_wr_bytes, ConfigurationError, "DMA write callback not installed");
+    fpenv_write(s_host_fpenv);
     s_pfn_libttsim_pci_dma_mem_wr_bytes(paddr, p, size);
+    s_host_fpenv = fpenv_read();
+    fpenv_write(DEFAULT_FPENV);
 }
 
 // transitional; to be removed once the PCIe/BAR path is in place everywhere (see docs/libttsim_api.md)
 extern "C" API_EXPORT void libttsim_tile_rd_bytes(uint32_t x, uint32_t y, uint64_t addr, void *p, uint32_t size) {
+    FpEnvGuard fpenv_guard;
     TTSIM_ERROR_NOFMT(UnsupportedFunctionality);
 }
 
 // transitional; to be removed once the PCIe/BAR path is in place everywhere (see docs/libttsim_api.md)
 extern "C" API_EXPORT void libttsim_tile_wr_bytes(uint32_t x, uint32_t y, uint64_t addr, const void *p, uint32_t size) {
+    FpEnvGuard fpenv_guard;
     TTSIM_ERROR_NOFMT(UnsupportedFunctionality);
 }
 
@@ -162,6 +233,7 @@ static void clock_current_chip() {
 }
 
 extern "C" API_EXPORT void libttsim_clock(uint32_t n_clocks) {
+    FpEnvGuard fpenv_guard;
     TTSIM_VERIFY(s_ttsim_running, ConfigurationError, "sim is not running");
 #if NUM_CHIPS > 1
     uint32_t saved_chip_id = g_current_chip_id;

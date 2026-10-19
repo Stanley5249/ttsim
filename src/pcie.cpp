@@ -267,7 +267,7 @@ static TlbTarget tlb_translate(uint32_t offset, uint32_t size) {
 #elif TT_ARCH_VERSION == 1
     uint32_t tlb_index = offset / 0x200000;
     offset &= 0x1FFFFF;
-    TTSIM_VERIFY(3*tlb_index < std::size(g_p_tile.tlb_cfg), AssertionFailure, "tlb_index=%d", tlb_index);
+    TTSIM_VERIFY(3 * tlb_index < std::size(g_p_tile.tlb_cfg), AssertionFailure, "tlb_index=%d", tlb_index);
     TTSIM_VERIFY(offset + size - 1 <= 0x1FFFFF, UnsupportedFunctionality, "TLB region overrun: offset=0x%x size=%d", offset, size);
     uint32_t tlb_cfg0 = g_p_tile.tlb_cfg[3*tlb_index + 0];
     uint32_t tlb_cfg1 = g_p_tile.tlb_cfg[3*tlb_index + 1];
@@ -300,7 +300,7 @@ static TlbTarget tlb_translate(uint32_t offset, uint32_t size) {
 static std::pair<uint32_t, uint64_t> tlb_translate_bar4(uint64_t offset, uint32_t size) {
     uint32_t tlb_index = 202 + uint32_t(offset >> 32);
     uint32_t window_offset = uint32_t(offset);
-    TTSIM_VERIFY(3*tlb_index < std::size(g_p_tile.tlb_cfg), AssertionFailure, "tlb_index=%d", tlb_index);
+    TTSIM_VERIFY(3 * tlb_index < std::size(g_p_tile.tlb_cfg), AssertionFailure, "tlb_index=%d", tlb_index);
     TTSIM_VERIFY(uint64_t(window_offset) + size <= 0x100000000ull, UnsupportedFunctionality, "TLB region overrun: offset=0x%x size=%d", window_offset, size);
     uint32_t tlb_cfg0 = g_p_tile.tlb_cfg[3*tlb_index + 0];
     uint32_t tlb_cfg1 = g_p_tile.tlb_cfg[3*tlb_index + 1];

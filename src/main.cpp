@@ -61,10 +61,12 @@ int main(int argc, char **argv) {
     uint32_t num_loads = 0;
     uint64_t init_a0 = 0, init_a1 = 0;
     const char *disk_path = nullptr;
+    bool disk_persist = false;
     bool interactive = false;
     const char *inject_text = nullptr;
     const char *inject_file = nullptr;
     uint64_t inject_at = 0;
+    const char *stop_text = nullptr;
     const char *tt_path = nullptr;
 
     // Bounds-checked option-argument accessor
@@ -104,6 +106,8 @@ int main(int argc, char **argv) {
             num_loads++;
         } else if (!strcmp(a, "--disk")) {
             disk_path = val(++i);
+        } else if (!strcmp(a, "--disk-persist")) {
+            disk_persist = true;
         } else if (!strcmp(a, "-i")) {
             interactive = true;
         } else if (!strcmp(a, "--uart-inject-at")) {
@@ -112,6 +116,8 @@ int main(int argc, char **argv) {
             inject_text = val(++i);
         } else if (!strcmp(a, "--uart-inject-file")) {
             inject_file = val(++i);
+        } else if (!strcmp(a, "--stop-on-uart-text")) {
+            stop_text = val(++i);
         } else if (!strcmp(a, "--tt-device")) {
             tt_path = val(++i);
         } else {
@@ -124,11 +130,15 @@ int main(int argc, char **argv) {
     if (tt_path) {
         rv64_sys_tt_attach(sys, tt_path);
     }
+    TTSIM_VERIFY(disk_path || !disk_persist, ConfigurationError, "--disk-persist requires --disk");
     if (disk_path) {
-        rv64_sys_set_disk(sys, disk_path);
+        rv64_sys_set_disk(sys, disk_path, disk_persist);
     }
     if (interactive) {
         rv64_sys_set_interactive(sys);
+    }
+    if (stop_text) {
+        rv64_sys_uart_stop(sys, stop_text);
     }
 
     TTSIM_VERIFY(!(inject_text && inject_file), ConfigurationError,

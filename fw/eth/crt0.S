@@ -36,7 +36,7 @@ eth_call_kernel:
     ret
 
 // Yield entry the active-erisc app calls (via the *0x9020 pointer) to let the base fw run its
-// housekeeping while the app holds the core. Per the eth ABI (CallingIntoCustomerCode.md) the only
+// housekeeping while the app holds the core. Per the eth ABI (tt-isa-documentation CallingIntoCustomerCode.md) the only
 // register this call may perturb is ra, so save/restore every caller-saved temporary/argument
 // register around the C service routine (gp/tp are untouched by the C code; s-regs are callee-saved).
 .section .text, "ax"

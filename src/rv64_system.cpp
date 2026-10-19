@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/mman.h>
 
@@ -82,6 +83,12 @@ struct Uart16550 {
     int stdin_flags; // saved stdin O_* flags for restore (-1 if not saved)
     struct termios stdin_termios;
     bool stdin_termios_valid;
+
+    // --stop-on-uart-text: end the run once the console output ends with stop_text.
+    const char *stop_text;
+    char *stop_tail; // the last stop_len bytes written
+    size_t stop_len;
+    struct timespec stop_t0;
 };
 
 struct RvSystem {
@@ -352,6 +359,21 @@ static uint64_t uart_read(RvSystem *p_sys, uint32_t offset) {
     }
 }
 
+static void uart_stop_check(RvSystem *p_sys, uint8_t val) {
+    Uart16550 *u = &p_sys->uart;
+    memmove(u->stop_tail, u->stop_tail + 1, u->stop_len - 1);
+    u->stop_tail[u->stop_len - 1] = char(val);
+    if (memcmp(u->stop_tail, u->stop_text, u->stop_len)) {
+        return;
+    }
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    printf("\nttsim: stop text found after %llu instructions, %.1f s\n", (unsigned long long)p_sys->insn_count,
+        double(t.tv_sec - u->stop_t0.tv_sec) + 1e-9 * double(t.tv_nsec - u->stop_t0.tv_nsec));
+    fflush(stdout);
+    exit(0);
+}
+
 static void uart_write(RvSystem *p_sys, uint32_t offset, uint8_t val) {
     Uart16550 *u = &p_sys->uart;
     switch (offset) {
@@ -362,6 +384,9 @@ static void uart_write(RvSystem *p_sys, uint32_t offset, uint8_t val) {
                 putchar(val); // UART -> console
                 fflush(stdout);
                 u->thr_ipending = true;
+                if (u->stop_len) {
+                    uart_stop_check(p_sys, val);
+                }
             }
             break;
         case 1:
@@ -507,7 +532,7 @@ static void plic_update(RvSystem *p_sys) {
         Rv64SysHartState *h = &p_sys->harts[ctx / 2];
         uint64_t bit = (ctx & 1) ? MIP_SEIP : MIP_MEIP;
         uint64_t old = h->mip;
-        if (pend) {
+        if (pend || (h->mip_seip_sw & bit)) {
             h->mip |= bit;
         } else {
             h->mip &= ~bit;
@@ -623,6 +648,17 @@ void rv64_sys_uart_inject(RvSystem *p_sys, uint64_t at, const uint8_t *data, siz
     u->inject_pos = 0;
     u->inject_at = at;
     u->inject_enabled = true;
+}
+
+// Wall time is measured from this call
+void rv64_sys_uart_stop(RvSystem *p_sys, const char *text) {
+    Uart16550 *u = &p_sys->uart;
+    u->stop_len = strlen(text);
+    TTSIM_VERIFY(u->stop_len, ConfigurationError, "--stop-on-uart-text requires a nonempty text");
+    u->stop_text = text;
+    u->stop_tail = (char *)calloc(u->stop_len, 1);
+    TTSIM_VERIFY(u->stop_tail, SystemError, "calloc(%zu) for --stop-on-uart-text failed", u->stop_len);
+    clock_gettime(CLOCK_MONOTONIC, &u->stop_t0);
 }
 
 static inline uint8_t *virtio_dram_ptr(RvSystem *p_sys, uint64_t addr, uint64_t len) {
@@ -832,13 +868,15 @@ static void virtio_write(RvSystem *p_sys, uint64_t paddr, uint32_t val) {
     }
 }
 
-void rv64_sys_set_disk(RvSystem *p_sys, const char *path) {
-    p_sys->disk = fopen(path, "rb");
+// Guest writes go to a private copy of the image, or with persist to the image file itself
+void rv64_sys_set_disk(RvSystem *p_sys, const char *path, bool persist) {
+    p_sys->disk = fopen(path, persist ? "r+b" : "rb");
     TTSIM_VERIFY(p_sys->disk, ConfigurationError, "cannot open --disk '%s'", path);
     fseeko(p_sys->disk, 0, SEEK_END);
     p_sys->disk_bytes = uint64_t(ftello(p_sys->disk));
     p_sys->disk_sectors = p_sys->disk_bytes / 512;
-    p_sys->disk_map = (uint8_t *)mmap(nullptr, p_sys->disk_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE, fileno(p_sys->disk), 0);
+    p_sys->disk_map = (uint8_t *)mmap(nullptr, p_sys->disk_bytes, PROT_READ | PROT_WRITE,
+        persist ? MAP_SHARED : MAP_PRIVATE, fileno(p_sys->disk), 0);
     TTSIM_VERIFY(p_sys->disk_map != MAP_FAILED, ConfigurationError, "cannot mmap --disk '%s'", path);
 }
 
@@ -854,6 +892,23 @@ static uint64_t rtc_read(RvSystem *p_sys, uint32_t offset) {
         case 0x04: return p_sys->rtc_latched_high;
         case 0x08: case 0x0C: case 0x18: return 0;
         default: TTSIM_ERROR(UnimplementedFunctionality, "offset=0x%x", offset);
+    }
+}
+
+// SiFive test device ("sifive,test0"): a 32-bit write to offset 0 of 0x5555 ends the simulation with exit
+// status 0, of 0x3333 | (code << 16) with the code's low byte (1 if that is 0). Reads return 0.
+static uint64_t syscon_read(uint32_t offset, uint32_t size) {
+    TTSIM_VERIFY((offset == 0) && (size == 4), UnimplementedFunctionality, "syscon: offset=0x%x size=%d", offset, size);
+    return 0;
+}
+
+static void syscon_write(uint32_t offset, uint32_t size, uint64_t val) {
+    TTSIM_VERIFY((offset == 0) && (size == 4), UnimplementedFunctionality, "syscon: offset=0x%x size=%d", offset, size);
+    uint32_t code = (uint32_t(val) >> 16) & 0xFF;
+    switch (val & 0xFFFF) {
+        case 0x5555: fflush(stdout); exit(0);
+        case 0x3333: fflush(stdout); exit(code ? code : 1);
+        default: TTSIM_ERROR(UnimplementedFunctionality, "syscon: val=0x%llx", val); // includes 0x7777 (reset)
     }
 }
 
@@ -918,7 +973,7 @@ static uint64_t device_read(RvSystem *p_sys, uint64_t paddr, uint32_t size) {
         return uart_read(p_sys, paddr - UART_BASE);
     }
     if ((paddr >= SYSCON_BASE) && (paddr < SYSCON_BASE + SYSCON_SIZE)) {
-        TTSIM_ERROR(UnimplementedFunctionality, "syscon: paddr=0x%llx size=%d", paddr, size);
+        return syscon_read(uint32_t(paddr - SYSCON_BASE), size);
     }
     if (p_sys->tt_active) {
         if ((paddr >= TT_ECAM_BASE) && (paddr < TT_ECAM_BASE + TT_ECAM_SIZE)) {
@@ -960,7 +1015,7 @@ static void device_write(RvSystem *p_sys, uint64_t paddr, uint32_t size, uint64_
         return uart_write(p_sys, paddr - UART_BASE, uint8_t(val));
     }
     if ((paddr >= SYSCON_BASE) && (paddr < SYSCON_BASE + SYSCON_SIZE)) {
-        TTSIM_ERROR(UnimplementedFunctionality, "syscon: paddr=0x%llx size=%d val=0x%llx", paddr, size, val);
+        return syscon_write(uint32_t(paddr - SYSCON_BASE), size, val);
     }
     if (p_sys->tt_active) {
         if ((paddr >= TT_ECAM_BASE) && (paddr < TT_ECAM_BASE + TT_ECAM_SIZE)) {
@@ -1325,7 +1380,7 @@ bool rv64_sys_store(Rv64SysHartState *h, uint64_t vaddr, const void *src, uint32
 
 bool rv64_sys_atomic_dram(Rv64SysHartState *h, uint64_t vaddr, uint32_t size, bool is_load) {
     uint64_t paddr;
-    if (!translate(h, vaddr, MemAccess::Load, &paddr)) [[unlikely]] {
+    if (!translate(h, vaddr, is_load ? MemAccess::Load : MemAccess::Store, &paddr)) [[unlikely]] {
         return false; // trap already set
     }
     if (!in_dram(h->p_sys, paddr, size)) [[unlikely]] {
@@ -1342,6 +1397,10 @@ void rv64_sys_sfence(Rv64SysHartState *h, uint64_t vaddr, uint64_t asid) {
 
 static uint64_t get_sstatus(Rv64SysHartState *h) {
     return h->mstatus & SSTATUS_MASK;
+}
+
+static inline uint64_t trap_vector(uint64_t tvec, uint64_t cause) {
+    return (tvec & ~3ull) + (((tvec & 1) && (cause >> 63)) ? (4 * (cause & 63)) : 0);
 }
 
 uint64_t rv64_sys_read_csr(Rv64SysHartState *h, uint32_t csr, bool *ok) {
@@ -1398,6 +1457,10 @@ uint64_t rv64_sys_read_csr(Rv64SysHartState *h, uint32_t csr, bool *ok) {
             if ((csr >= 0xC03) && (csr <= 0xC12)) {
                 return h->mhpmcounter[csr - 0xC00];
             }
+            if (((csr >= 0xB13) && (csr <= 0xB1F)) || ((csr >= 0x333) && (csr <= 0x33F)) ||
+                ((csr >= 0xC13) && (csr <= 0xC1F))) {
+                return 0; // counters 19-31 are read-only zero
+            }
             *ok = false;
             return 0;
     }
@@ -1440,6 +1503,8 @@ void rv64_sys_write_csr(Rv64SysHartState *h, uint32_t csr, uint64_t val, bool *o
         case CSR_MTVEC: h->mtvec = val & ~2ull; break; // WARL: MODE bit 1 reserved (only Direct/Vectored)
         case CSR_MSCRATCH: h->mscratch = val; break;
         case CSR_MEPC: h->mepc = val & ~1ull; break;
+        case CSR_MCAUSE: h->mcause = val; break;
+        case CSR_MTVAL: h->mtval = val; break;
         case CSR_MCOUNTEREN: h->mcounteren = val & 0x7FFFF; break;
         case CSR_MCOUNTINHIBIT: h->mcountinhibit = val & 0x7FFFD; break;
         case CSR_MENVCFG:
@@ -1464,6 +1529,8 @@ void rv64_sys_write_csr(Rv64SysHartState *h, uint32_t csr, uint64_t val, bool *o
         case CSR_STVEC: h->stvec = val & ~2ull; break; // WARL: MODE bit 1 reserved (only Direct/Vectored)
         case CSR_SSCRATCH: h->sscratch = val; break;
         case CSR_SEPC: h->sepc = val & ~1ull; break;
+        case CSR_SCAUSE: h->scause = val; break;
+        case CSR_STVAL: h->stval = val; break;
         case CSR_SATP: {
             uint32_t mode = (val >> 60) & 15;
             TTSIM_VERIFY((mode == 0) || (mode == 8), NonContractualBehavior,
@@ -1477,15 +1544,18 @@ void rv64_sys_write_csr(Rv64SysHartState *h, uint32_t csr, uint64_t val, bool *o
                 "scounteren write sets reserved counter bits: 0x%llx", val);
             h->scounteren = val;
             break;
-        case CSR_FFLAGS: h->fcsr = (h->fcsr & ~0x1F) | (val & 0x1F); break;
-        case CSR_FCSR: h->fcsr = val & 0xFF; break;
+        case CSR_FFLAGS: h->fcsr = (h->fcsr & ~0x1F) | (val & 0x1F); rv64_fpu_mark_dirty(h); break;
+        case CSR_FRM: h->fcsr = (h->fcsr & 0x1F) | ((val & 7) << 5); rv64_fpu_mark_dirty(h); break;
+        case CSR_FCSR: h->fcsr = val & 0xFF; rv64_fpu_mark_dirty(h); break;
         case CSR_PMPCFG0: h->pmpcfg[0] = val; break;
         case CSR_PMPADDR0 ... CSR_PMPADDR0 + 15: h->pmpaddr[csr - CSR_PMPADDR0] = val; break;
         case CSR_PMPADDR0 + 16 ... CSR_PMPADDR0 + 63: break; // WARL for OpenSBI probing
         case 0xB03 ... 0xB12: h->mhpmcounter[csr - 0xB00] = val; break;
         case 0x323 ... 0x332: h->mhpmevent[csr - 0x320] = val; break;
+        case 0xB13 ... 0xB1F: case 0x333 ... 0x33F: break; // counters 19-31 are read-only zero
         default:
-            TTSIM_ERROR(UnimplementedFunctionality, "csr=0x%x", csr);
+            rv64_sys_read_csr(h, csr, ok); // no such CSR: illegal instruction
+            TTSIM_VERIFY(!*ok, UnimplementedFunctionality, "csr=0x%x", csr);
     }
 }
 
@@ -1501,46 +1571,6 @@ void rv64_sys_raise(Rv64SysHartState *h, uint64_t cause, uint64_t tval) {
         return;
     }
     fault(h, cause, tval);
-}
-
-void rv64_sys_take_trap(Rv64SysHartState *h, uint64_t cause, uint64_t tval, uint64_t epc) {
-    bool interrupt = (cause & CAUSE_INTERRUPT) != 0;
-    uint64_t code = cause & ~CAUSE_INTERRUPT;
-    [[maybe_unused]] uint32_t from_priv = h->priv;
-    h->reservation_valid = false; // clear the LR/SC reservation on any trap entry (interrupt or exception)
-    bool to_s = false;
-    if (h->priv <= PRIV_S) {
-        uint64_t deleg = interrupt ? h->mideleg : h->medeleg;
-        if ((deleg >> code) & 1) {
-            to_s = true;
-        }
-    }
-    if (to_s) {
-        h->sepc = epc;
-        h->scause = cause;
-        h->stval = tval;
-        uint64_t st = h->mstatus;
-        st = (st & ~MSTATUS_SPIE) | ((st & MSTATUS_SIE) ? MSTATUS_SPIE : 0);
-        st = (st & ~MSTATUS_SPP) | ((h->priv == PRIV_S) ? MSTATUS_SPP : 0);
-        st &= ~MSTATUS_SIE;
-        h->mstatus = st;
-        h->priv = PRIV_S;
-        uint64_t base = h->stvec & ~3ull;
-        h->pc = ((h->stvec & 1) && interrupt) ? (base + 4 * code) : base;
-    } else {
-        h->mepc = epc;
-        h->mcause = cause;
-        h->mtval = tval;
-        uint64_t st = h->mstatus;
-        st = (st & ~MSTATUS_MPIE) | ((st & MSTATUS_MIE) ? MSTATUS_MPIE : 0);
-        st = (st & ~MSTATUS_MPP) | (uint64_t(h->priv) << MSTATUS_MPP_SHIFT);
-        st &= ~MSTATUS_MIE;
-        h->mstatus = st;
-        h->priv = PRIV_M;
-        uint64_t base = h->mtvec & ~3ull;
-        h->pc = ((h->mtvec & 1) && interrupt) ? (base + 4 * code) : base;
-    }
-    tlb_flush_l1(h);
 }
 
 void rv64_sys_xret(Rv64SysHartState *h, bool from_machine) {
@@ -1676,8 +1706,7 @@ static void take_trap(Rv64SysHartState *p_hart, uint64_t *npc, uint64_t cause, u
         p_hart->mstatus = ms;
         p_hart->priv = 1;
         clear_load_reservation(p_hart);
-        uint64_t tvec = p_hart->stvec;
-        *npc = (tvec & ~3ull);
+        *npc = trap_vector(p_hart->stvec, cause_val);
     } else {
         p_hart->mepc = epc;
         p_hart->mcause = cause_val;
@@ -1689,8 +1718,7 @@ static void take_trap(Rv64SysHartState *p_hart, uint64_t *npc, uint64_t cause, u
         p_hart->mstatus = ms;
         p_hart->priv = 3;
         clear_load_reservation(p_hart);
-        uint64_t tvec = p_hart->mtvec;
-        *npc = (tvec & ~3ull);
+        *npc = trap_vector(p_hart->mtvec, cause_val);
     }
     if (p_hart->priv != old_prv) {
         tlb_flush_l1(p_hart);
@@ -1708,7 +1736,7 @@ static void fault(Rv64SysHartState *p_hart, uint64_t cause, uint64_t tval) {
     p_hart->trap_pending = true;
     p_hart->trap_pc = fault_pc;
     p_hart->trap_npc = npc;
-    if (cause != 12) { // for anything other than an instruction fetch fault...
+    if (cause != EXC_INST_PAGE_FAULT) { // for anything other than an instruction fetch fault...
         g_sys.visible_icount--; // cancel out the later increment
     }
     p_hart->steps_left = 0;
@@ -1736,6 +1764,8 @@ static void irq_recompute_deliverable(Rv64SysHartState *p_hart) {
 static void hart_write_mip(Rv64SysHartState *p_hart, uint64_t v) {
     clint_refresh_irq(p_hart);
     p_hart->mip = (v & ~MIP_PLATFORM_MASK) | (p_hart->mip & MIP_PLATFORM_MASK);
+    p_hart->mip_seip_sw = v & MIP_SEIP;
+    plic_update(p_hart->p_sys);
     irq_reschedule(p_hart);
 }
 
@@ -1871,7 +1901,10 @@ static void check_interrupts(Rv64SysHartState *p_hart) {
 
     int cause = -1;
     {
-        static const int pri[] = {11, 7, 3, 9, 1, 5}; // MTIP wins over MSIP, SSIP wins over STIP
+        if (all & ~p_hart->mideleg) {
+            all &= ~p_hart->mideleg; // interrupts to M-mode go first
+        }
+        static const int pri[] = {11, 3, 7, 9, 1, 5}; // MEI, MSI, MTI, SEI, SSI, STI
         for (size_t i = 0; i < std::size(pri); i++) {
             if (all & (1ull << pri[i])) {
                 cause = pri[i];

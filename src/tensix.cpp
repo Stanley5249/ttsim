@@ -297,8 +297,10 @@ uint32_t tensix_cfg_rd32(TensixState *p_tensix, uint32_t bank, uint32_t offset) 
         CFG_REG_BANKED_RD(15)
         CFG_REG_BANKED_RD(17)
         CFG_REG_BANKED_RD(18)
+        CFG_REG_BANKED_RD(19)
         CFG_REG_BANKED_RD(24)
         CFG_REG_BANKED_RD(28)
+        CFG_REG_BANKED_RD(36)
         CFG_REG_BANKED_RD(56)
         CFG_REG_BANKED_RD(57)
         CFG_REG_BANKED_RD(59)
@@ -429,11 +431,13 @@ void tensix_cfg_wr32(TensixState *p_tensix, uint32_t bank, uint32_t offset, uint
         CFG_REG_BANKED_WR(15)
         CFG_REG_BANKED_WR(17)
         CFG_REG_BANKED_WR(18)
+        CFG_REG_BANKED_WR(19)
         CFG_REG_BANKED_WR(20)
         CFG_REG_BANKED_WR(21)
         CFG_REG_BANKED_WR(24)
         CFG_REG_BANKED_WR(25)
         CFG_REG_BANKED_WR(28)
+        CFG_REG_BANKED_WR(36)
         CFG_REG_BANKED_WR(50)
         CFG_REG_BANKED_WR(56)
         CFG_REG_BANKED_WR(57)
@@ -950,6 +954,8 @@ TENSIX_EXECUTE_MOVD2B() {
 }
 
 TENSIX_EXECUTE_MOVB2A() {
+    // Note: HW erratum: a MOVB2A starting exactly three cycles after a Matrix Unit computation loses a Dest write
+    // tag, after which later computations' Dest writes go to the wrong rows or are dropped; not modeled
     TTSIM_VERIFY(instr_mod == 2, UnsupportedFunctionality, "instr_mod=%d", instr_mod);
     uint32_t n_rows = 4;
     TTSIM_VERIFY(!(srcb & (n_rows - 1)), UnsupportedFunctionality, "srcb=%d", srcb);
@@ -1008,15 +1014,19 @@ TENSIX_EXECUTE_ZEROACC() {
             dst += dst_offset;
             TTSIM_VERIFY(dst < DST_ROWS, UnimplementedFunctionality, "clear 1 row: dst=%d", dst);
             TTSIM_VERIFY(!p_config->ALU_ACC_CTRL_INT8_math_enabled, UnimplementedFunctionality, "ALU_ACC_CTRL_INT8_math_enabled");
+#if TT_ARCH_VERSION == 0
             if (p_config->ALU_ACC_CTRL_Fp32_enabled) {
                 p_tensix->dst_row_valid[dst32b_adjust_row(dst)] = false;
             } else {
                 p_tensix->dst_row_valid[dst] = false;
             }
+#else
+            p_tensix->dst_row_valid[dst] = false; // the width is use_32_bit_mode's (clear_mode 4), not the accumulator's
+#endif
             break;
         case 1: // clear 16 rows
 #if TT_ARCH_VERSION == 1
-            if (!p_tensix->DEST_ACCESS_CFG_zeroacc_absolute_tile_mode && (dst_offset & 512)) {
+            if (!p_tensix->DEST_ACCESS_CFG_zeroacc_absolute_tile_mode && ((dst + dst_offset) & 512)) { // dst counts as a row when picking the half
                 dst += 32;
             }
 #endif
@@ -1027,7 +1037,7 @@ TENSIX_EXECUTE_ZEROACC() {
             break;
 #if TT_ARCH_VERSION == 1
         case 5: // clear 32b 16 rows -- XXX only supported in very limited cases for a HW bug workaround
-            if (!p_tensix->DEST_ACCESS_CFG_zeroacc_absolute_tile_mode && (dst_offset & 768)) {
+            if (!p_tensix->DEST_ACCESS_CFG_zeroacc_absolute_tile_mode && ((dst + dst_offset) & 768)) {
                 dst += 16;
             }
             TTSIM_VERIFY(dst < DST_ROWS / 32, NonContractualBehavior, "clear 32b 16 rows: dst=%d", dst);
@@ -1116,6 +1126,10 @@ TENSIX_EXECUTE_MOVA2D() {
         use_8b_exponent = false;
     }
     bool use_dst32b = (src_a_fmt == 4);
+    // XXX tt-llk's BH 32-bit transpose_dest and broadcast datacopy still write low halves into a 16-bit Dest
+    TTSIM_VERIFY(((use_dst32b || dest_32b_lo) == (p_config->ALU_ACC_CTRL_Fp32_enabled || p_config->ALU_ACC_CTRL_INT8_math_enabled)) ||
+                 (dest_32b_lo && !use_dst32b),
+        UndefinedBehavior, "Dest width: use_dst32b=%d dest_32b_lo=%d", use_dst32b, dest_32b_lo);
     bool flush_denormals = !p_config->ALU_ACC_CTRL_Zero_Flag_disabled_src;
 
     uint32_t src_a_row = src + p_tensix->src_a_rwc[pipe];
@@ -1191,6 +1205,10 @@ TENSIX_EXECUTE_MOVB2D() {
         use_8b_exponent = false;
     }
     bool use_dst32b = (src_a_fmt == 4);
+    // XXX tt-llk's BH 32-bit transpose_dest and broadcast datacopy still write low halves into a 16-bit Dest
+    TTSIM_VERIFY(((use_dst32b || dest_32b_lo) == (p_config->ALU_ACC_CTRL_Fp32_enabled || p_config->ALU_ACC_CTRL_INT8_math_enabled)) ||
+                 (dest_32b_lo && !use_dst32b),
+        UndefinedBehavior, "Dest width: use_dst32b=%d dest_32b_lo=%d", use_dst32b, dest_32b_lo);
     bool flush_denormals = !p_config->ALU_ACC_CTRL_Zero_Flag_disabled_src;
 
     uint32_t src_b_row = src + p_tensix->src_b_rwc[pipe];
@@ -1254,6 +1272,19 @@ TENSIX_EXECUTE_TRNSPSRCB() {
     return true;
 }
 
+// man shifted right by exp_diff and rounded to a multiple of 1 << lsb, to nearest with ties away from zero (towards
+// zero for a negative term)
+static inline uint32_t fpu_align_term(uint32_t man, uint32_t sign, uint32_t exp_diff, uint32_t lsb) {
+    uint32_t shift = exp_diff + lsb;
+    if (!shift) {
+        return man;
+    } else if (shift >= 31) {
+        return 0;
+    } else {
+        return ((man + (1 << (shift - 1)) - sign) >> shift) << lsb;
+    }
+}
+
 // Normalize sop and dst terms to a common exponent, then add, renormalize, and encode
 static uint32_t fpu_accum_normalize_encode(uint32_t sign_sop0, int32_t exp_sop0, uint32_t man_sop0,
                                            uint32_t sign_sop1, int32_t exp_sop1, uint32_t man_sop1,
@@ -1269,35 +1300,12 @@ static uint32_t fpu_accum_normalize_encode(uint32_t sign_sop0, int32_t exp_sop0,
     if (exp <= 0) { // early underflow case (before normalization/rounding)
         return 0;
     }
-    if (exp_sop0 < exp) {
-        uint32_t exp_diff = exp - exp_sop0;
-        if (exp_diff < 31) {
-            man_sop0 = (man_sop0 + (1 << (exp_diff - 1)) - sign_sop0) >> exp_diff;
-        } else {
-            man_sop0 = 0;
-        }
-    }
-    if (exp_sop1 < exp) {
-        uint32_t exp_diff = exp - exp_sop1;
-        if (exp_diff < 31) {
-            man_sop1 = (man_sop1 + (1 << (exp_diff - 1)) - sign_sop1) >> exp_diff;
-        } else {
-            man_sop1 = 0;
-        }
-    }
-    if (exp_dst < exp) {
-        uint32_t exp_diff = exp - exp_dst;
-        if (exp_diff < 31) {
-            man_dst = (man_dst + (1 << (exp_diff - 1))) >> exp_diff;
-        } else {
-            man_dst = 0;
-        }
-    }
-    if (!fp32_acc) { // low 13 mantissa bits are rounded away unless fp32_acc
-        man_sop0 = (man_sop0 + (1 << 12) - sign_sop0) & ~0x1FFF;
-        man_sop1 = (man_sop1 + (1 << 12) - sign_sop1) & ~0x1FFF;
-        man_dst = (man_dst + (1 << 12)) & ~0x1FFF;
-    }
+    // Low 13 mantissa bits are rounded away unless fp32_acc, in the same step as the alignment: rounding at both
+    // would round a term just below half an ulp up
+    uint32_t lsb = fp32_acc ? 0 : 13;
+    man_sop0 = fpu_align_term(man_sop0, sign_sop0, exp - exp_sop0, lsb);
+    man_sop1 = fpu_align_term(man_sop1, sign_sop1, exp - exp_sop1, lsb);
+    man_dst = fpu_align_term(man_dst, 0, exp - exp_dst, lsb);
 
     uint32_t sign = sign_dst;
     int32_t man = man_dst;
@@ -1569,10 +1577,10 @@ static bool tensix_matmul_op(TensixState *p_tensix, uint32_t pipe, uint32_t dst,
     } else if ((src_a_fmt == 1) || (src_a_fmt == 10)) { // fp16/fp8
         TTSIM_VERIFY(src_a_fmt == src_b_fmt, UnsupportedFunctionality, "fp16 src_a_fmt=%d src_b_fmt=%d", src_a_fmt, src_b_fmt);
     } else {
-        TTSIM_VERIFY((src_a_fmt == 0) || (src_a_fmt == 4) || (src_a_fmt == 5) || (src_a_fmt == 6) || (src_a_fmt == 7),
-            UnimplementedFunctionality, "bf16 src_a_fmt=%d src_b_fmt=%d", src_a_fmt, src_b_fmt); // fp32, tf32, bf16, bfp8, bfp4
-        TTSIM_VERIFY((src_b_fmt == 0) || (src_b_fmt == 4) || (src_b_fmt == 5) || (src_b_fmt == 6) || (src_b_fmt == 7) || (src_b_fmt == 9),
-            UnimplementedFunctionality, "bf16 src_a_fmt=%d src_b_fmt=%d", src_a_fmt, src_b_fmt); // fp32, tf32, bf16, bfp8, bfp4, int16
+        TTSIM_VERIFY((src_a_fmt == 0) || (src_a_fmt == 4) || (src_a_fmt == 5) || (src_a_fmt == 6) || (src_a_fmt == 7) || (src_a_fmt == 15),
+            UnimplementedFunctionality, "bf16 src_a_fmt=%d src_b_fmt=%d", src_a_fmt, src_b_fmt); // fp32, tf32, bf16, bfp8, bfp4, bfp2
+        TTSIM_VERIFY((src_b_fmt == 0) || (src_b_fmt == 4) || (src_b_fmt == 5) || (src_b_fmt == 6) || (src_b_fmt == 7) || (src_b_fmt == 9) || (src_b_fmt == 15),
+            UnimplementedFunctionality, "bf16 src_a_fmt=%d src_b_fmt=%d", src_a_fmt, src_b_fmt); // fp32, tf32, bf16, bfp8, bfp4, int16, bfp2
     }
     bool use_dst32b = is_int8 || p_config->ALU_ACC_CTRL_Fp32_enabled;
     bool flush_denormals = !p_config->ALU_ACC_CTRL_Zero_Flag_disabled_src;
@@ -1790,6 +1798,10 @@ static bool tensix_elw_op(TensixState *p_tensix, uint32_t pipe, uint32_t dst, ui
                 TTSIM_VERIFY(!(value_a & 0x70000000), UnsupportedFunctionality, "SrcA 5b-exp datum=0x%x has nonzero high-3 exp bits", value_a);
                 TTSIM_VERIFY(!(value_b & 0x70000000), UnsupportedFunctionality, "SrcB 5b-exp datum=0x%x has nonzero high-3 exp bits", value_b);
             }
+#if TT_ARCH_VERSION == 0
+            value_a = src_format_mask(value_a, src_a_fmt);
+            value_b = src_format_mask(value_b, src_b_fmt);
+#endif
             if (is_int8) {
                 bool zero_a = !(value_a & 0x7F800000); // note: flush denormals to zeros applies to INT8 too
                 bool zero_b = flush_denormals && !(value_b & 0x7F800000);
@@ -1807,10 +1819,6 @@ static bool tensix_elw_op(TensixState *p_tensix, uint32_t pipe, uint32_t dst, ui
                 write_dst32b<true>(p_tensix, dst_row + row, col, dst_encode_int32(result));
                 continue;
             }
-#if TT_ARCH_VERSION == 0
-            value_a = src_format_mask(value_a, src_a_fmt);
-            value_b = src_format_mask(value_b, src_b_fmt);
-#endif
             value_a >>= 13;
             value_b >>= 13;
             bool zero_a = ((value_a & 0x3FFFF) < 0x400);
@@ -2146,7 +2154,7 @@ TENSIX_EXECUTE_PACR() {
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
     const TensixConfigState *p_config = &p_tensix->config[state_id];
-    // Note: PCK_EDGE_TILE_FACE_SET_SELECT_enable (cfg15/19) is not instantiated and errors on write; always 0
+    // Note: on WH, PCK_EDGE_TILE_FACE_SET_SELECT_enable (cfg15) is not instantiated and errors on write; always 0
     uint32_t tile_row_set_mapping[2][16] = { // XXX This is clunky/slow relative to using a shift, but that requires us to hardcode cfg reg nums?
         {
             p_config->TILE_ROW_SET_MAPPING_0_row_set_mapping_0,
@@ -2185,6 +2193,27 @@ TENSIX_EXECUTE_PACR() {
             p_config->TILE_ROW_SET_MAPPING_1_row_set_mapping_15,
         }
     };
+#if TT_ARCH_VERSION == 1
+    // Note: TILE_FACE_SET_MAPPING_1..3 (cfg37-39) are not instantiated and error on write; always 0
+    uint32_t tile_face_set_mapping[16] = {
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_0,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_1,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_2,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_3,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_4,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_5,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_6,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_7,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_8,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_9,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_10,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_11,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_12,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_13,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_14,
+        p_config->TILE_FACE_SET_MAPPING_0_face_set_mapping_15,
+    };
+#endif
     uint32_t pack_reads_per_xy_plane = p_config->PACK_COUNTERS_SEC0_pack_reads_per_xy_plane;
     TTSIM_VERIFY((pack_reads_per_xy_plane >= 1) && (pack_reads_per_xy_plane <= 16), UnsupportedFunctionality, "pack_reads_per_xy_plane=%d", pack_reads_per_xy_plane);
 #if TT_ARCH_VERSION == 0
@@ -2310,6 +2339,10 @@ TENSIX_EXECUTE_PACR() {
         count *= __builtin_popcount(read_intf_sel); // one 16 datum Dst row per enabled read interface
     }
     constexpr uint32_t n_packers = 1;
+    // the tile row for edge masking starts at 4 * ((Offset >> k) & 3), k the lowest set bit of the row stride in rows
+    uint32_t y_stride_rows = (ch0_y_stride >> (6 - std::min(pack_src_format & 3, 2u))) & 0x1FF;
+    uint32_t y_stride_shift = y_stride_rows ? __builtin_ctz(y_stride_rows) : 0;
+    uint32_t tpg_y_offset = 4 * ((p_tensix->DEST_TARGET_REG_CFG_PACK_SEC0_Offset >> y_stride_shift) & 3);
 #else
     // XXX for now, just allow zero or any power of two <= 256
     TTSIM_VERIFY((count <= 256) && !(count & (count - 1)), UnimplementedFunctionality, "count=%d", count);
@@ -2321,6 +2354,13 @@ TENSIX_EXECUTE_PACR() {
         uint32_t tpg_y = p_tensix->packer_valid ? p_tensix->packer_tpg_y[packer] : 0;
         [[maybe_unused]] uint32_t tpg_z = p_tensix->packer_valid ? p_tensix->packer_tpg_z[packer] : 0;
         uint32_t edge_mask_b = (p_config->PCK_EDGE_TILE_ROW_SET_SELECT_select >> (2 * packer)) & 3;
+#if TT_ARCH_VERSION == 1
+        if (p_config->PCK_EDGE_TILE_FACE_SET_SELECT_enable) { // the face's row set mapping replaces the select
+            uint32_t edge_mask_a = p_config->PCK_EDGE_TILE_FACE_SET_SELECT_select & 3;
+            TTSIM_VERIFY(!edge_mask_a, UnimplementedFunctionality, "edge_mask_a=%d", edge_mask_a);
+            edge_mask_b = tile_face_set_mapping[tpg_z & 15];
+        }
+#endif
         TTSIM_VERIFY(edge_mask_b <= 1, UnimplementedFunctionality, "edge_mask_b=%d", edge_mask_b);
         uint32_t pack_row = src_addr / ROW_SIZE;
         switch (packer) {
@@ -2376,7 +2416,7 @@ TENSIX_EXECUTE_PACR() {
         uint16_t bfp_buffer[16];
         for (uint32_t i = 0; i < count; i++) {
 #if TT_ARCH_VERSION == 1
-            uint32_t edge_mask_c = tile_row_set_mapping[edge_mask_b][(tpg_y + i / ROW_SIZE) & 15];
+            uint32_t edge_mask_c = tile_row_set_mapping[edge_mask_b][(tpg_y + tpg_y_offset + i / ROW_SIZE) & 15];
 #else
             uint32_t edge_mask_c = tile_row_set_mapping[edge_mask_b][tpg_y & 15];
 #endif
@@ -2463,40 +2503,34 @@ TENSIX_EXECUTE_PACR() {
                     value = read_dst16b(p_tensix, row, col);
 #if TT_ARCH_VERSION == 1
                     if ((intermediate_format == 1) && p_config->PCK_DEST_RD_CTRL_Round_10b_mant) {
-                        value = dst_decode_bf16(value);
-                        int32_t e = ((value >> 7) & 255) - 112;
-                        uint32_t m = value & 0x7F;
-                        if (e < 0) {
-                            value = (value & 0x8000);
-                        } else if (e > 31) {
-                            value = (value & 0x8000) | 0x7FFF;
-                        } else {
-                            value = (value & 0x8000) | (e << 10) | (m << 3);
-                        }
+                        value = dst_decode_bf16(value) << 3; // as e8m10, like the fp32 path; rebiased after ReLU
                     } else
 #endif
                     if ((intermediate_format == 1) || (intermediate_format == 2)) {
                         value = dst_decode_fp16(value);
-                        TTSIM_VERIFY(!read_raw, UnimplementedFunctionality, "fp16 to fp16: read_raw=%d", read_raw);
+                        TTSIM_VERIFY(!read_raw || (pack_fmt_conv_mode == 0x11), UnimplementedFunctionality,
+                            "pack_fmt_conv_mode=0x%x read_raw=%d", pack_fmt_conv_mode, read_raw);
                         if (intermediate_format == 2) {
                             if ((value & 0x7FFF) > 0x7FF7) {
                                 value = (value & 0x8000) | 0x7FF0;
                             }
                             value = (value + 8) & ~15; // round to E5M6, keep 16 bits
                         }
-                        if ((value & 0x7FFF) < 0x400) {
+                        if (!read_raw && ((value & 0x7FFF) < 0x400)) { // read_raw keeps denormals and -0
                             value = 0;
                         }
                     } else if ((intermediate_format == 5) || (intermediate_format == 6)) {
                         value = dst_decode_bf16(value);
-                        TTSIM_VERIFY(!read_raw, UnimplementedFunctionality, "bf16 to bf16: read_raw=%d", read_raw);
-                        if ((value & 0x7FFF) > 0x7F80) {
+                        TTSIM_VERIFY(!read_raw || (pack_fmt_conv_mode == 0x55), UnimplementedFunctionality,
+                            "pack_fmt_conv_mode=0x%x read_raw=%d", pack_fmt_conv_mode, read_raw);
+                        if (!read_raw && ((value & 0x7FFF) > 0x7F80)) { // read_raw keeps NaN, denormals and -0
                             value = (value & 0x8000) | 0x7F80;
-                        } else if ((value & 0x7FFF) < 0x80) {
-                            value = 0;
                         }
                         if (intermediate_format == 6) {
                             value = (value + 1) & ~1; // reduce to m6 instead of m7
+                        }
+                        if (!read_raw && ((value & 0x7FFF) < 0x80)) {
+                            value = 0;
                         }
                     } else if (intermediate_format != 9) {
                         TTSIM_ERROR(UnimplementedFunctionality, "dst16b intermediate_format=%d", intermediate_format);
@@ -2504,14 +2538,17 @@ TENSIX_EXECUTE_PACR() {
                 }
                 if (uint32_t apply_relu = p_config->STACC_RELU_ApplyRelu) {
                     TTSIM_VERIFY(apply_relu <= 3, UnsupportedFunctionality, "apply_relu=%d", apply_relu);
-                    TTSIM_VERIFY(!(p_config->STACC_RELU_ReluThreshold & 0x8000), UndefinedBehavior,
+                    TTSIM_VERIFY((apply_relu == 1) || !(p_config->STACC_RELU_ReluThreshold & 0x8000), UndefinedBehavior,
                         "negative relu_threshold=0x%x", p_config->STACC_RELU_ReluThreshold);
                     TTSIM_VERIFY((intermediate_format == 0) || (intermediate_format == 1) || (intermediate_format == 2) ||
                                  (intermediate_format == 5) || (intermediate_format == 6) || (intermediate_format == 8),
                         UnimplementedFunctionality, "relu intermediate_format=%d",
                         intermediate_format);
 #if TT_ARCH_VERSION == 1
-                    if ((intermediate_format == 1) && p_config->PCK_DEST_RD_CTRL_Read_32b_data) {
+                    if ((intermediate_format == 1) && p_config->PCK_DEST_RD_CTRL_Round_10b_mant) {
+                        // a 16-bit read keeps a value equal to the threshold in columns 0-7 when another Dest cell isn't 0
+                        TTSIM_VERIFY((apply_relu != 2) || p_config->PCK_DEST_RD_CTRL_Read_32b_data,
+                            UnimplementedFunctionality, "bf16 to fp16 apply_relu=%d", apply_relu);
                         uint32_t threshold = p_config->STACC_RELU_ReluThreshold << 3;
                         if (value & 0x40000) {
                             value = 0;
@@ -2525,10 +2562,18 @@ TENSIX_EXECUTE_PACR() {
                     } else
 #endif
                     if ((intermediate_format == 1) || (intermediate_format == 2) || (intermediate_format == 5) || (intermediate_format == 6)) {
+#if TT_ARCH_VERSION == 1
+                        // columns 0-7 keep an fp16 value equal to the threshold whose low 3 mantissa bits aren't 0
+                        bool keep_equal = (intermediate_format == 1) && (col < 8) &&
+                            (p_config->STACC_RELU_ReluThreshold & 7);
+#else
+                        bool keep_equal = false;
+#endif
                         if (value & 0x8000) {
                             value = 0;
                         }
-                        if ((apply_relu == 2) && (value <= p_config->STACC_RELU_ReluThreshold)) {
+                        if ((apply_relu == 2) && (value <= p_config->STACC_RELU_ReluThreshold) &&
+                            !((value == p_config->STACC_RELU_ReluThreshold) && keep_equal)) {
                             value = 0;
                         }
                         if ((apply_relu == 3) && (value > p_config->STACC_RELU_ReluThreshold)) {
@@ -2554,7 +2599,7 @@ TENSIX_EXECUTE_PACR() {
                     }
                 }
 #if TT_ARCH_VERSION == 1
-                if ((intermediate_format == 1) && p_config->PCK_DEST_RD_CTRL_Read_32b_data) {
+                if ((intermediate_format == 1) && p_config->PCK_DEST_RD_CTRL_Round_10b_mant) {
                     uint32_t s = value >> 18;
                     int32_t e = int32_t((value >> 10) & 255) - 112;
                     uint32_t m = value & 0x3FF;
@@ -2588,7 +2633,7 @@ TENSIX_EXECUTE_PACR() {
                     uint32_t s = (value >> 15) & 1;
                     uint32_t e = (value >> 10) & 0x1F;
                     uint32_t m = value & 0x3FF;
-                    if (e <= 8) {
+                    if (e < 8) { // e = 8 falls through, keeping m >> 7 under a zero exponent
                         value = s << 7; // flush denormal to zero (preserving sign)
                     } else if (e >= 24) {
                         value = (s << 7) | 0x7F;
@@ -2704,8 +2749,20 @@ TENSIX_EXECUTE_PACR() {
             uint32_t data_pad_end = (data_end + 15) & ~15u;
             if (data_end != data_pad_end) {
                 TTSIM_VERIFY(data_pad_end <= TENSIX_SRAM_SIZE, UndefinedBehavior, "pad out of bounds data_pad_end=0x%x", data_pad_end);
-                for (uint32_t addr = data_end; addr < data_pad_end; addr++) {
-                    g_t_tiles[p_tensix->tile_id].sram[addr] = 0;
+                uint8_t *sram = g_t_tiles[p_tensix->tile_id].sram;
+                if (!pack_l1_acc) {
+                    for (uint32_t addr = data_end; addr < data_pad_end; addr++) {
+                        sram[addr] = 0;
+                    }
+                } else if (dst_element_size_bits == 32) { // the padding is accumulated too, as +0
+                    for (uint32_t addr = data_end; addr < data_pad_end; addr += 4) {
+                        mem_wr<uint32_t>(&sram[addr], pack_l1_acc_fp32(mem_rd<uint32_t>(&sram[addr]), 0));
+                    }
+                } else {
+                    for (uint32_t addr = data_end; addr < data_pad_end; addr += 2) {
+                        uint16_t old = mem_rd<uint16_t>(&sram[addr]);
+                        mem_wr<uint16_t>(&sram[addr], (pack_dst_format == 5) ? pack_l1_acc_bf16(old, 0) : pack_l1_acc_fp16(old, 0));
+                    }
                 }
             }
             if (is_bfp_format(pack_dst_format)) {
@@ -2981,6 +3038,9 @@ TENSIX_EXECUTE_UNPACR() {
     if (bfp_exp_stream) {
         TTSIM_VERIFY(first_datum + count <= 65536, UndefinedBehavior,
             "bfp exponent index out of range: first_datum=%d count=%d", first_datum, count);
+        // BFP4/BFP2 datums may start mid-word only if they also end in it; otherwise silicon garbles them
+        TTSIM_VERIFY(!(src_addr_bits & 127) || ((src_addr_bits & 127) + count * in_element_size_bits <= 128), UndefinedBehavior,
+            "bfp_exp_stream: misaligned src_addr_bits=0x%x count=%d", src_addr_bits, count);
     }
     if (unpack_to_dst) {
         TTSIM_VERIFY(!p_tensix->thread[pipe].SRCA_SET_SetOvrdWithAddr, UndefinedBehavior, "unpack_to_dst: SRCA_SET_SetOvrdWithAddr=1");
@@ -2992,6 +3052,9 @@ TENSIX_EXECUTE_UNPACR() {
                                                     : p_config->THCON_SEC0_REG2_Throttle_mode;
 #if TT_ARCH_VERSION == 0
     TTSIM_VERIFY(throttle_mode <= 2, UndefinedBehavior, "invalid throttle_mode=%d", throttle_mode);
+#elif TT_ARCH_VERSION == 1
+    TTSIM_VERIFY(!(p_config->THCON_SEC0_REG1_ovrd_default_throttle_mode && (throttle_mode == 3) && (in_element_size_bits == 4)),
+        UndefinedBehavior, "throttle_mode=%d with in_data_format=%d", throttle_mode, in_data_format);
 #endif
     if (!unpack_to_dst && !unpack_block_selection && (count > ROW_SIZE)) { // check for SrcA burst drop cases
         // This logic is mildly simplified and conservative vs. exact (rather complex) silicon behavior
@@ -3146,7 +3209,7 @@ TENSIX_EXECUTE_UNPACR() {
                 write_dst16b(p_tensix, row, col, value);
             }
         } else if (unpack_block_selection) {
-            TTSIM_VERIFY(row < SRC_ROWS, UndefinedBehavior, "src_b row=%d", row);
+            TTSIM_VERIFY(row < SRC_ROWS, UnsupportedFunctionality, "src_b row=%d", row);
             p_tensix->src_b[src_bank][row][col] = value;
         } else {
 #if TT_ARCH_VERSION == 1
@@ -3289,7 +3352,7 @@ TENSIX_EXECUTE_REG2FLOP() {
     TTSIM_VERIFY((size_sel == 1) || (size_sel == 2), UnsupportedFunctionality, "size_sel=%d", size_sel); // XXX we are ignoring this right now
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
-    tensix_cfg_wr32(p_tensix, state_id, 4*(flop_index + 52), p_tensix->dma_regs[pipe][reg_index]);
+    tensix_cfg_wr32(p_tensix, state_id, 4 * (flop_index + 52), p_tensix->dma_regs[pipe][reg_index]);
     return true;
 #endif
 }
@@ -3544,8 +3607,8 @@ static inline void for_each_lane(uint32_t mask, Func f) {
 TENSIX_EXECUTE_SFPLOAD() {
     TTSIM_VERIFY(!(dest_reg_addr & 1), UnimplementedFunctionality, "dest_reg_addr=%d", dest_reg_addr);
     TTSIM_VERIFY(lreg_ind < 12, UnimplementedFunctionality, "lreg_ind=%d", lreg_ind);
-    TTSIM_VERIFY(!instr_mod0 || (instr_mod0 == 2) || (instr_mod0 == 3) || (instr_mod0 == 4) || (instr_mod0 == 6) ||
-                 (instr_mod0 == 12) || (instr_mod0 == 14) || (instr_mod0 == 15),
+    TTSIM_VERIFY(!instr_mod0 || (instr_mod0 == 1) || (instr_mod0 == 2) || (instr_mod0 == 3) || (instr_mod0 == 4) ||
+                 (instr_mod0 == 6) || (instr_mod0 == 12) || (instr_mod0 == 14) || (instr_mod0 == 15),
         UnimplementedFunctionality, "instr_mod0=%d", instr_mod0);
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
@@ -3681,8 +3744,10 @@ static uint16_t sfpu_store_to_fp16(uint32_t x) {
 TENSIX_EXECUTE_SFPSTORE() {
     TTSIM_VERIFY(!(dest_reg_addr & 1), UnimplementedFunctionality, "dest_reg_addr=%d", dest_reg_addr);
     TTSIM_VERIFY(lreg_ind < 12, UnimplementedFunctionality, "lreg_ind=%d", lreg_ind); // note some of the constant LRegs can be stored
-    TTSIM_VERIFY(!instr_mod0 || (instr_mod0 == 2) || (instr_mod0 == 3) || (instr_mod0 == 4) || (instr_mod0 == 6) || (instr_mod0 == 7) ||
-                 (instr_mod0 == 9) || (instr_mod0 == 12) || (instr_mod0 == 14) || (instr_mod0 == 15),
+    // Note: HW erratum (WH only): an SFPSTORE writing Dest in the same cycle as a Matrix Unit instruction, in the same
+    // half, drops the Matrix Unit's write (e.g. ELWADD, two NOPs, SFPSTORE); not modeled
+    TTSIM_VERIFY(!instr_mod0 || (instr_mod0 == 1) || (instr_mod0 == 2) || (instr_mod0 == 3) || (instr_mod0 == 4) || (instr_mod0 == 6) ||
+                 (instr_mod0 == 7) || (instr_mod0 == 9) || (instr_mod0 == 12) || (instr_mod0 == 14) || (instr_mod0 == 15),
         UnimplementedFunctionality, "instr_mod0=%d", instr_mod0);
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
@@ -4941,7 +5006,6 @@ TENSIX_EXECUTE_SFPARECIP() {
 TENSIX_EXECUTE_ATGETM() {
     TTSIM_VERIFY(mutex_index < std::size(p_tensix->mutex), UndefinedBehavior, "mutex_index=%d", mutex_index);
     TTSIM_VERIFY(mutex_index != 1, UndefinedBehavior, "mutex_index=%d", mutex_index); // mutex 1 is not valid, per the docs
-    TTSIM_VERIFY(!mutex_index, UntestedFunctionality, "mutex_index=%d", mutex_index);
 
     TTSIM_VERIFY(p_tensix->mutex[mutex_index] != pipe + 1, NonContractualBehavior, "mutex %d already acquired by current pipe", mutex_index);
     if (p_tensix->mutex[mutex_index]) {
@@ -4954,7 +5018,6 @@ TENSIX_EXECUTE_ATGETM() {
 TENSIX_EXECUTE_ATRELM() {
     TTSIM_VERIFY(mutex_index < std::size(p_tensix->mutex), UndefinedBehavior, "mutex_index=%d", mutex_index);
     TTSIM_VERIFY(mutex_index != 1, UndefinedBehavior, "mutex_index=%d", mutex_index); // mutex 1 is not valid, per the docs
-    TTSIM_VERIFY(!mutex_index, UntestedFunctionality, "mutex_index=%d", mutex_index);
 
     TTSIM_VERIFY(p_tensix->mutex[mutex_index] == pipe + 1, NonContractualBehavior, "mutex %d not acquired by this pipe", mutex_index);
     p_tensix->mutex[mutex_index] = 0;
@@ -5071,7 +5134,7 @@ TENSIX_EXECUTE_SEMWAIT() {
 }
 
 TENSIX_EXECUTE_WRCFG() {
-    TTSIM_VERIFY(cfg_reg < 4*TENSIX_CFG_STATE_SIZE, UndefinedBehavior, "cfg_reg=%d", cfg_reg);
+    TTSIM_VERIFY(cfg_reg < 4 * TENSIX_CFG_STATE_SIZE, UndefinedBehavior, "cfg_reg=%d", cfg_reg);
     TTSIM_VERIFY(gpr_address < std::size(p_tensix->dma_regs[pipe]), AssertionFailure, "gpr_address=%d out of range", gpr_address);
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
@@ -5079,16 +5142,16 @@ TENSIX_EXECUTE_WRCFG() {
         TTSIM_VERIFY(!(cfg_reg & 3), NonContractualBehavior, "misaligned cfg_reg=%d", cfg_reg);
         TTSIM_VERIFY(!(gpr_address & 3), NonContractualBehavior, "misaligned gpr_address=%d", gpr_address);
         for (uint32_t i = 0; i < 4; i++) {
-            tensix_cfg_wr32(p_tensix, state_id, 4*(cfg_reg + i), p_tensix->dma_regs[pipe][gpr_address + i]);
+            tensix_cfg_wr32(p_tensix, state_id, 4 * (cfg_reg + i), p_tensix->dma_regs[pipe][gpr_address + i]);
         }
     } else {
-        tensix_cfg_wr32(p_tensix, state_id, 4*cfg_reg, p_tensix->dma_regs[pipe][gpr_address]);
+        tensix_cfg_wr32(p_tensix, state_id, 4 * cfg_reg, p_tensix->dma_regs[pipe][gpr_address]);
     }
     return true;
 }
 
 TENSIX_EXECUTE_RDCFG() {
-    TTSIM_VERIFY(cfg_reg < 4*TENSIX_CFG_STATE_SIZE, UndefinedBehavior, "cfg_reg=%d", cfg_reg);
+    TTSIM_VERIFY(cfg_reg < 4 * TENSIX_CFG_STATE_SIZE, UndefinedBehavior, "cfg_reg=%d", cfg_reg);
     TTSIM_VERIFY(gpr_address < std::size(p_tensix->dma_regs[pipe]), AssertionFailure, "gpr_address=%d out of range", gpr_address);
 
     uint32_t state_id = get_state_id(p_tensix, pipe);

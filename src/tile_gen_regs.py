@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Emits _out/{chip}/tile_regs.h from data/{chip}/tile_regs.json.
-# The JSON files are produced (and maintained) by scripts/parse_tile_regs.py.
 import argparse
 import json
 from typing import TextIO

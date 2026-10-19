@@ -1234,6 +1234,18 @@
     "name": "PCK_DEST_RD_CTRL_Round_10b_mant"
    }
   ],
+  "19": [
+   {
+    "shift": 0,
+    "size": 8,
+    "name": "PCK_EDGE_TILE_FACE_SET_SELECT_select"
+   },
+   {
+    "shift": 8,
+    "size": 1,
+    "name": "PCK_EDGE_TILE_FACE_SET_SELECT_enable"
+   }
+  ],
   "20": [
    {
     "shift": 0,
@@ -1451,6 +1463,88 @@
     "size": 8,
     "unsupported": true,
     "name": "PACK_COUNTERS_SEC0_auto_ctxt_inc_xys_cnt"
+   }
+  ],
+  "36": [
+   {
+    "shift": 0,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_0"
+   },
+   {
+    "shift": 2,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_1"
+   },
+   {
+    "shift": 4,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_2"
+   },
+   {
+    "shift": 6,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_3"
+   },
+   {
+    "shift": 8,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_4"
+   },
+   {
+    "shift": 10,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_5"
+   },
+   {
+    "shift": 12,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_6"
+   },
+   {
+    "shift": 14,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_7"
+   },
+   {
+    "shift": 16,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_8"
+   },
+   {
+    "shift": 18,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_9"
+   },
+   {
+    "shift": 20,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_10"
+   },
+   {
+    "shift": 22,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_11"
+   },
+   {
+    "shift": 24,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_12"
+   },
+   {
+    "shift": 26,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_13"
+   },
+   {
+    "shift": 28,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_14"
+   },
+   {
+    "shift": 30,
+    "size": 2,
+    "name": "TILE_FACE_SET_MAPPING_0_face_set_mapping_15"
    }
   ],
   "50": [

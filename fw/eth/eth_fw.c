@@ -49,7 +49,7 @@
 extern void eth_call_kernel(uint32_t entry, uint32_t gp, uint32_t sp);
 
 // Cooperative-yield pointer an active-erisc app calls periodically to let the base fw run its
-// housekeeping (CallingIntoCustomerCode.md). We point it at eth_yield_entry (the ABI-preserving shim
+// housekeeping (tt-isa-documentation CallingIntoCustomerCode.md). We point it at eth_yield_entry (the ABI-preserving shim
 // in crt0.S, which calls eth_yield_service) so routing keeps running while metal's app holds the core.
 #define ETH_APP_YIELD_PTR_ADDR 0x9020
 extern void eth_yield_entry(void);

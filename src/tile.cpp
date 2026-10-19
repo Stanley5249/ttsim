@@ -1091,9 +1091,9 @@ static uint32_t riscv_debug_regs_rd32(uint32_t tile_id, uint32_t tensix_id, uint
             p_tile->dbg_bus_ctrl = data;
             break;
         case RISCV_DEBUG_REGS_TENSIX_CREG_READ:
-            TTSIM_VERIFY(data < TENSIX_CFG_STATE_SIZE*4, UnimplementedFunctionality,
+            TTSIM_VERIFY(data < TENSIX_CFG_STATE_SIZE * 4, UnimplementedFunctionality,
                 "TENSIX_CREG_READ: data=0x%x", data);
-            p_tile->tensix_creg_rddata = tensix_cfg_rd32(&p_tile->tensix[0], 0, 4*data);
+            p_tile->tensix_creg_rddata = tensix_cfg_rd32(&p_tile->tensix[0], 0, 4 * data);
             break;
         case RISCV_DEBUG_REGS_DBG_ARRAY_RD_EN:
             TTSIM_VERIFY(data <= 1, UnsupportedFunctionality, "DBG_ARRAY_RD_EN: data=0x%x", data);

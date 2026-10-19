@@ -49,7 +49,7 @@ static inline uint32_t hostfp_round_bits(uint32_t rm) {
         case 1: return 3u << 13; // RTZ
         case 2: return 1u << 13; // RDN
         case 3: return 2u << 13; // RUP
-        case 4: TTSIM_ERROR(UnimplementedFunctionality, "rm=RMM");
+        case 4: return 0u << 13; // RMM: RNE, then rmm() rounds ties away
         default: TTSIM_ERROR(AssertionFailure, "fp-rm=%u", rm);
     }
 }
@@ -131,7 +131,7 @@ static inline uint64_t hostfp_round_bits(uint32_t rm) {
         case 1: return 3ull << 22; // RTZ
         case 2: return 2ull << 22; // RDN
         case 3: return 1ull << 22; // RUP
-        case 4: TTSIM_ERROR(UnimplementedFunctionality, "rm=RMM");
+        case 4: return 0ull << 22; // RMM: RNE, then rmm() rounds ties away
         default: TTSIM_ERROR(AssertionFailure, "fp-rm=%u", rm);
     }
 }
@@ -206,7 +206,7 @@ static inline int hostfp_round_mode(uint32_t rm) {
         case 1: return FE_TOWARDZERO;
         case 2: return FE_DOWNWARD;
         case 3: return FE_UPWARD;
-        case 4: TTSIM_ERROR(UnimplementedFunctionality, "rm=RMM");
+        case 4: return FE_TONEAREST; // RMM: RNE, then rmm() rounds ties away
         default: TTSIM_ERROR(AssertionFailure, "fp-rm=%u", rm);
     }
 }
@@ -534,11 +534,60 @@ static U fsgnj(U a, U b, uint32_t mode, U sign_mask) {
     return (a & ~sign_mask) | s;
 }
 
+// |v| = m * 2^e, m odd or 0
+struct Dyadic {
+    bool neg;
+    unsigned __int128 m;
+    int e;
+};
+
+// f, or with half = 1 the midpoint between f and the next value away from zero
+template<class F> static Dyadic dyadic(F f, uint32_t half = 0) {
+    using U = std::conditional_t<sizeof(F) == 4, uint32_t, uint64_t>;
+    constexpr int MB = (sizeof(F) == 4) ? 23 : 52, BIAS = (sizeof(F) == 4) ? 127 : 1023;
+    U b = std::bit_cast<U>(f), ef = (b << 1) >> (MB + 1);
+    uint64_t m = 2 * ((b & ((U(1) << MB) - 1)) | (U(ef != 0) << MB)) + half;
+    int z = m ? std::countr_zero(m) : 0;
+    return {bool(b >> (8 * sizeof(F) - 1)), m >> z, (ef ? int(ef) : 1) - BIAS - MB - 1 + z};
+}
+
+static Dyadic dmul(Dyadic a, Dyadic b) {
+    return {a.neg != b.neg, a.m * b.m, a.e + b.e};
+}
+
+// The host rounded x = x0 + x1, or x0 / y, to nearest even as r; for RMM, round a tie (x0 + x1 == y * the midpoint)
+// away from zero instead, with the same flags. Terms that sum to 0 lie within 108 bits: two share the lowest set bit,
+// and the highest is at most one above theirs.
+template<class F> static F rmm(F r, uint32_t fl, Dyadic x0, Dyadic x1 = {}, Dyadic y = {false, 1, 0}) {
+    using U = std::conditional_t<sizeof(F) == 4, uint32_t, uint64_t>;
+    U b = std::bit_cast<U>(r);
+    if (!(fl & FFLAG_NX) || ((b << 1) >= (~U(0) << ((sizeof(F) == 4) ? 24 : 53)))) { // exact, Inf or NaN
+        return r;
+    }
+    Dyadic m = dmul(dyadic(r, 1), y), t[3] = {x0, x1, {!m.neg, m.m, m.e}};
+    int lo = 1 << 30, hi = -lo;
+    for (const Dyadic &d : t) {
+        uint64_t top = uint64_t(d.m >> 64);
+        int h = d.e + (top ? 128 - std::countl_zero(top) : 64 - std::countl_zero(uint64_t(d.m)));
+        lo = (d.m && d.e < lo) ? d.e : lo;
+        hi = (d.m && h > hi) ? h : hi;
+    }
+    if (hi - lo > 108) {
+        return r;
+    }
+    __int128 sum = 0;
+    for (const Dyadic &d : t) {
+        sum += d.m ? (d.neg ? -1 : 1) * __int128(d.m << (d.e - lo)) : 0;
+    }
+    return sum ? r : std::bit_cast<F>(U(b + 1));
+}
+
 static uint32_t hostfp_add_s(uint32_t a, uint32_t b, uint32_t rm, uint32_t *fl, bool sub) {
     float fa = std::bit_cast<float>(a), fb = std::bit_cast<float>(b);
     fp_begin(rm);
     float r = sub ? fa - fb : fa + fb;
     *fl |= fp_end_flags();
+    r = (rm == RV_RMM) ? rmm(r, *fl, dyadic(fa), dyadic(sub ? -fb : fb)) : r;
     return hostfp_result_s(r);
 }
 
@@ -547,6 +596,7 @@ static uint64_t hostfp_add_d(uint64_t a, uint64_t b, uint32_t rm, uint32_t *fl, 
     fp_begin(rm);
     double r = sub ? fa - fb : fa + fb;
     *fl |= fp_end_flags();
+    r = (rm == RV_RMM) ? rmm(r, *fl, dyadic(fa), dyadic(sub ? -fb : fb)) : r;
     return hostfp_result_d(r);
 }
 
@@ -555,6 +605,7 @@ static uint32_t hostfp_mul_s(uint32_t a, uint32_t b, uint32_t rm, uint32_t *fl) 
     fp_begin(rm);
     float r = fa * fb;
     *fl |= fp_end_flags();
+    r = (rm == RV_RMM) ? rmm(r, *fl, dmul(dyadic(fa), dyadic(fb))) : r;
     return hostfp_result_s(r);
 }
 
@@ -563,6 +614,7 @@ static uint64_t hostfp_mul_d(uint64_t a, uint64_t b, uint32_t rm, uint32_t *fl) 
     fp_begin(rm);
     double r = fa * fb;
     *fl |= fp_end_flags();
+    r = (rm == RV_RMM) ? rmm(r, *fl, dmul(dyadic(fa), dyadic(fb))) : r;
     return hostfp_result_d(r);
 }
 
@@ -571,6 +623,7 @@ static uint32_t hostfp_div_s(uint32_t a, uint32_t b, uint32_t rm, uint32_t *fl) 
     fp_begin(rm);
     float r = fa / fb;
     *fl |= fp_end_flags();
+    r = (rm == RV_RMM) ? rmm(r, *fl, dyadic(fa), {}, dyadic(fb)) : r;
     return hostfp_result_s(r);
 }
 
@@ -579,6 +632,7 @@ static uint64_t hostfp_div_d(uint64_t a, uint64_t b, uint32_t rm, uint32_t *fl) 
     fp_begin(rm);
     double r = fa / fb;
     *fl |= fp_end_flags();
+    r = (rm == RV_RMM) ? rmm(r, *fl, dyadic(fa), {}, dyadic(fb)) : r;
     return hostfp_result_d(r);
 }
 
@@ -603,6 +657,9 @@ static uint32_t hostfp_fma_s(uint32_t a, uint32_t b, uint32_t c, uint32_t rm, ui
     fp_begin(rm);
     float r = fp_fma_s(fa, fb, fc);
     *fl |= fp_end_flags();
+    // Inf * 0 is invalid even with a quiet NaN addend, which x86 doesn't flag
+    *fl |= ((SF32::is_inf(a) && SF32::is_zero(b)) || (SF32::is_zero(a) && SF32::is_inf(b))) ? FFLAG_NV : 0;
+    r = (rm == RV_RMM) ? rmm(r, *fl, dmul(dyadic(fa), dyadic(fb)), dyadic(fc)) : r;
     return hostfp_result_s(r);
 }
 
@@ -611,6 +668,9 @@ static uint64_t hostfp_fma_d(uint64_t a, uint64_t b, uint64_t c, uint32_t rm, ui
     fp_begin(rm);
     double r = fp_fma_d(fa, fb, fc);
     *fl |= fp_end_flags();
+    // Inf * 0 is invalid even with a quiet NaN addend, which x86 doesn't flag
+    *fl |= ((SF64::is_inf(a) && SF64::is_zero(b)) || (SF64::is_zero(a) && SF64::is_inf(b))) ? FFLAG_NV : 0;
+    r = (rm == RV_RMM) ? rmm(r, *fl, dmul(dyadic(fa), dyadic(fb)), dyadic(fc)) : r;
     return hostfp_result_d(r);
 }
 
@@ -619,6 +679,7 @@ static uint32_t hostfp_cvt_s_d(uint64_t d, uint32_t rm, uint32_t *fl) { // FCVT.
     fp_begin(rm);
     float r = float(x);
     *fl |= fp_end_flags();
+    r = (rm == RV_RMM) ? rmm(r, *fl, dyadic(x)) : r;
     return hostfp_result_s(r);
 }
 
@@ -638,7 +699,24 @@ static uint64_t hostfp_to_int_d(uint64_t a, uint32_t rm, uint32_t *fl, int bits,
     return SF64::to_int(a, rm, fl, bits, sgn);
 }
 
+// The host can't round to nearest with ties away (RMM), so round |x| to P bits here; the conversion is then exact
+template<class F, int P> static F from_int_rmm(uint64_t xr, uint32_t r2, uint32_t *fl) {
+    int64_t sx = (r2 == 0) ? int32_t(xr) : (r2 == 2) ? int64_t(xr) : 0;
+    uint64_t m = (r2 == 1) ? uint32_t(xr) : (r2 == 3) ? xr : (sx < 0) ? -uint64_t(sx) : uint64_t(sx);
+    int drop = 64 - std::countl_zero(m) - P;
+    F r = F(m);
+    if (drop > 0) {
+        uint64_t ulp = 1ull << drop, sum = m + ulp / 2;
+        r = (sum < m) ? F(18446744073709551616.0) : F(sum & -ulp); // a sum that wraps is 2^64
+        *fl |= (m & (ulp - 1)) ? FFLAG_NX : 0;
+    }
+    return (sx < 0) ? -r : r;
+}
+
 static uint32_t hostfp_from_int_s(uint64_t xr, uint32_t r2, uint32_t rm, uint32_t *fl) {
+    if (rm == 4) {
+        return std::bit_cast<uint32_t>(from_int_rmm<float, 24>(xr, r2, fl));
+    }
     fp_begin(rm);
     float r = (r2 == 0) ? float(int32_t(xr)) : (r2 == 1) ? float(uint32_t(xr))
             : (r2 == 2) ? float(int64_t(xr)) : float(uint64_t(xr));
@@ -647,6 +725,9 @@ static uint32_t hostfp_from_int_s(uint64_t xr, uint32_t r2, uint32_t rm, uint32_
 }
 
 static uint64_t hostfp_from_int_d(uint64_t xr, uint32_t r2, uint32_t rm, uint32_t *fl) {
+    if (rm == 4) {
+        return std::bit_cast<uint64_t>(from_int_rmm<double, 53>(xr, r2, fl));
+    }
     fp_begin(rm);
     double r = (r2 == 0) ? double(int32_t(xr)) : (r2 == 1) ? double(uint32_t(xr))
              : (r2 == 2) ? double(int64_t(xr)) : double(uint64_t(xr));

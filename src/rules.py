@@ -22,6 +22,7 @@ def rules(ctx):
     compile_opts = [
         '-std=c++20', '-Wall', '-Wextra', '-Wno-unused-parameter', '-Wundef', '-Wcast-qual', '-Werror', '-MMD',
         '-fPIC', '-fvisibility=hidden', '-fno-exceptions', '-fno-rtti',
+        '-ffp-contract=off', # for hostfp, do not fuse a*b + c
     ]
     if ctx.host.os != 'darwin':
         compile_opts += ['-fno-semantic-interposition']

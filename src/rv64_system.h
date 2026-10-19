@@ -41,6 +41,7 @@ struct Rv64SysHartState {
     uint64_t mideleg;
     uint64_t mie;
     uint64_t mip;
+    uint64_t mip_seip_sw; // the software-writable SEIP; mip.SEIP is its OR with the PLIC's
     uint64_t mtvec;
     uint64_t mscratch;
     uint64_t mepc;
@@ -122,7 +123,6 @@ bool rv64_sys_in_dram(RvSystem *p_sys, uint64_t paddr, uint64_t size);
 uint64_t rv64_sys_read_csr(Rv64SysHartState *p_hart, uint32_t csr, bool *ok);
 void rv64_sys_write_csr(Rv64SysHartState *p_hart, uint32_t csr, uint64_t val, bool *ok);
 void rv64_sys_raise(Rv64SysHartState *p_hart, uint64_t cause, uint64_t tval);
-void rv64_sys_take_trap(Rv64SysHartState *p_hart, uint64_t cause, uint64_t tval, uint64_t epc);
 void rv64_sys_xret(Rv64SysHartState *p_hart, bool from_machine);
 void rv64_sys_sfence(Rv64SysHartState *p_hart, uint64_t vaddr, uint64_t asid);
 
@@ -134,9 +134,10 @@ uint64_t rv64_sys_reset_rom_base();
 void rv64_sys_pause_yield(Rv64SysHartState *p_hart);
 void rv64_sys_lr_reserve(Rv64SysHartState *p_hart, uint64_t vaddr, uint32_t size);
 void rv64_sys_run(RvSystem *p_sys, uint64_t max_insns);
-void rv64_sys_set_disk(RvSystem *p_sys, const char *path);
+void rv64_sys_set_disk(RvSystem *p_sys, const char *path, bool persist);
 void rv64_sys_set_irq(RvSystem *p_sys, uint32_t source, bool level);
 void rv64_sys_set_interactive(RvSystem *p_sys);
 void rv64_sys_set_hart_quantum(RvSystem *p_sys, uint32_t q);
 void rv64_sys_uart_inject(RvSystem *p_sys, uint64_t at, const uint8_t *data, size_t len);
+void rv64_sys_uart_stop(RvSystem *p_sys, const char *text);
 void rv64_sys_tt_attach(RvSystem *p_sys, const char *path);
