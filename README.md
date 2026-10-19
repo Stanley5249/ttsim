@@ -193,6 +193,12 @@ src/_out/release_riscv64/ttsim --harts 8 -i \
 `-i` attaches the simulated UART console to your terminal. Ctrl-C is hooked and passed into the
 simulator, so use Ctrl-\ if you need to forcibly exit.
 
+Guest writes to the `--disk` image go to a private copy and are discarded at exit; add `--disk-persist` to
+write them to the image file itself.
+
+`--stop-on-uart-text <text>` ends the run when the console output contains `<text>` (e.g. the shell prompt) and
+prints the instruction count and wall time at that point, to measure boot time.
+
 Note that your .dtb must declare more harts in order for Linux to use them.
 
 ### Bringing up a Tenstorrent chip inside the guest

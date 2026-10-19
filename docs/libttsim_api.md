@@ -134,6 +134,13 @@ process.
   (`libttsim_clock`, the access functions) allocates nothing and frees nothing.
 - **Signals.** The library installs no signal handlers and does not alter the host's signal
   disposition.
+- **Floating-point environment.** Results do not depend on the caller's floating-point environment
+  (MXCSR on x86_64, FPCR and FPSR on aarch64, `fcsr` on riscv64). Every entry point runs under the
+  default environment - round to nearest even, no flush-to-zero or denormals-are-zero, all
+  exceptions masked - whatever the caller has set, and the caller's environment, sticky exception
+  flags included, is back in place whenever the caller's code runs: when the entry point returns,
+  and for the duration of each DMA callback. What a callback changes in it is kept. The library does
+  no x87 arithmetic, so the x87 control and status words are not part of its environment.
 - **I/O.** The library performs no file or network I/O. It writes diagnostic text to stdout/stderr;
   it does not open files, sockets, or devices.
 - **Exceptions.** The library is compiled without C++ exception support and never throws. No
@@ -234,8 +241,9 @@ The following require the staged lead-time treatment above:
 - Changing the process model in a way a host must account for (e.g. the singleton or once-only
   `libttsim_init` semantics).
 - Changing the host-process guarantees - e.g. beginning to perform file or network I/O, installing
-  signal handlers, allocating memory after `libttsim_init` returns, loading code via `dlopen`, or
-  generating or self-modifying executable code (JIT).
+  signal handlers, allocating memory after `libttsim_init` returns, loading code via `dlopen`,
+  generating or self-modifying executable code (JIT), or depending on or changing the caller's
+  floating-point environment.
 - Changing the documented meaning of an environment variable the library reads.
 - Adding a new mandatory runtime dependency, or dropping support for a currently supported CI
   platform.
