@@ -71,9 +71,11 @@ void     libttsim_pci_config_wr32(uint32_t bus_device_function, uint32_t offset,
 
 32-bit PCI configuration-space access. `bus_device_function` is the conventional 16-bit PCI tuple;
 bits above bit 15 are a fatal error. Endpoints are single-function, and an empty slot or a non-zero
-function reads all-ones (`0xFFFFFFFF`). Endpoints are not necessarily contiguous - the Blackhole
-Galaxy build places its 32 at sparse locations matching the chips' physical tray and ASIC slots - so
-a host must probe every bus/device slot rather than stop at the first all-ones.
+function reads all-ones (`0xFFFFFFFF`). Endpoints are not necessarily contiguous - the Wormhole
+and Blackhole Galaxy builds place each of their 32 chips on its own bus at device 0, matching the
+cluster descriptor's PCI buses (the bus's high nibble is the tray, its low nibble the 1-based ASIC
+slot) - so a host must probe every bus/device slot rather than stop at the first all-ones. Endpoints
+enumerate in bus order, which need not be chip order.
 
 `offset` must be 4-byte aligned; other values are fatal errors. The config read at offset 0 returns
 the vendor and device ID identifying the simulated chip; the BAR base-address registers are also
