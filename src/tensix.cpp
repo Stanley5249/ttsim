@@ -2263,6 +2263,7 @@ TENSIX_EXECUTE_PACR() {
         "intermediate_format=%d mismatches late_from_format=%d", intermediate_format, pack_src_format);
     uint32_t pack_fmt_conv_mode = (p_config->PCK_DEST_RD_CTRL_Read_32b_data << 8) | (pack_src_format << 4) | pack_dst_format;
     TTSIM_VERIFY((pack_fmt_conv_mode == 0x10) || (pack_fmt_conv_mode == 0x11) || (pack_fmt_conv_mode == 0x15) || // fp16 src, fp32/fp16/bf16 dst
+                 ((pack_fmt_conv_mode == 0x00) && (TT_ARCH_VERSION == 1)) || // bh only bf16 read widened to fp32
                  ((pack_fmt_conv_mode == 0x1A) && (TT_ARCH_VERSION == 1)) || // bh only fp16 src, fp8 dst
                  (pack_fmt_conv_mode == 0x26) || // bfp8a src, bfp8 dst
                  (pack_fmt_conv_mode == 0x50) || (pack_fmt_conv_mode == 0x55) || // bf16 src, fp32/bf16 dst
@@ -2284,6 +2285,12 @@ TENSIX_EXECUTE_PACR() {
         TTSIM_VERIFY(!p_config->PCK_DEST_RD_CTRL_Round_10b_mant, UnimplementedFunctionality,
             "pack_fmt_conv_mode=0x%x round_10b_mant=%d", pack_fmt_conv_mode, p_config->PCK_DEST_RD_CTRL_Round_10b_mant);
     }
+#if TT_ARCH_VERSION == 1
+    if (pack_fmt_conv_mode == 0x00) {
+        TTSIM_VERIFY(!p_config->STACC_RELU_ApplyRelu && !p_config->PCK_DEST_RD_CTRL_Read_int8, UnimplementedFunctionality,
+            "pack_fmt_conv_mode=0x0 apply_relu=%d read_raw=%d", p_config->STACC_RELU_ApplyRelu, p_config->PCK_DEST_RD_CTRL_Read_int8);
+    }
+#endif
     uint32_t src_element_size_bits = get_element_size(pack_src_format);
     uint32_t dst_element_size_bits = get_element_size(pack_dst_format);
     uint32_t src_element_align = (src_element_size_bits + 7) / 8; // no alignment needed for 2/4-bit formats
@@ -2532,6 +2539,10 @@ TENSIX_EXECUTE_PACR() {
                         if (!read_raw && ((value & 0x7FFF) < 0x80)) {
                             value = 0;
                         }
+#if TT_ARCH_VERSION == 1
+                    } else if (intermediate_format == 0) { // bf16 widened to fp32, keeping NaN, denormals and -0
+                        value = uint32_t(dst_decode_bf16(value)) << 16;
+#endif
                     } else if (intermediate_format != 9) {
                         TTSIM_ERROR(UnimplementedFunctionality, "dst16b intermediate_format=%d", intermediate_format);
                     }
@@ -2830,6 +2841,13 @@ TENSIX_EXECUTE_PACR() {
         p_addr_ctrl->ch1_z = (p_addr_ctrl->ch1_z + z1_incr) & ADC_Z_MASK;
     }
 
+#if TT_ARCH_VERSION == 1
+    // A PACR with Last clear and an fp32 or int32 intermediate format that reads three or four Dest rows holds its
+    // output, and the packer stays busy, until the next PACR
+    bool held = !last && (__builtin_popcount(read_intf_sel) >= 3) &&
+                ((intermediate_format == 0) || (intermediate_format == 8));
+    p_tensix->pack_held_pipe = held ? pipe + 1 : 0;
+#endif
     return true;
 }
 
@@ -3053,8 +3071,17 @@ TENSIX_EXECUTE_UNPACR() {
 #if TT_ARCH_VERSION == 0
     TTSIM_VERIFY(throttle_mode <= 2, UndefinedBehavior, "invalid throttle_mode=%d", throttle_mode);
 #elif TT_ARCH_VERSION == 1
-    TTSIM_VERIFY(!(p_config->THCON_SEC0_REG1_ovrd_default_throttle_mode && (throttle_mode == 3) && (in_element_size_bits == 4)),
+    // Forced x8 works only for 8-bit (and BFP2, which always runs at x1) input: BFP4 hangs, 16- and 32-bit input
+    // loses half its rows, and FP32 converted to FP16 or BF16 hangs
+    TTSIM_VERIFY(!(p_config->THCON_SEC0_REG1_ovrd_default_throttle_mode && (throttle_mode == 3) &&
+                   ((in_element_size_bits == 4) || (in_element_size_bits >= 16))),
         UndefinedBehavior, "throttle_mode=%d with in_data_format=%d", throttle_mode, in_data_format);
+    // At x4 (BFP4's default), a BFP4 run that starts within a group of 16 exponents must end within it: crossing
+    // into the next group gives datums past the boundary wrong exponents
+    bool bfp4_x4 = bfp_exp_stream && (in_element_size_bits == 4) &&
+                   !(p_config->THCON_SEC0_REG1_ovrd_default_throttle_mode && (throttle_mode < 2));
+    TTSIM_VERIFY(!(bfp4_x4 && (first_datum & 255) && (first_datum + count > ((first_datum + 255) & ~255u))),
+        UndefinedBehavior, "bfp_exp_stream: bfp4 first_datum=%d count=%d crosses an exponent group", first_datum, count);
 #endif
     if (!unpack_to_dst && !unpack_block_selection && (count > ROW_SIZE)) { // check for SrcA burst drop cases
         // This logic is mildly simplified and conservative vs. exact (rather complex) silicon behavior
@@ -5055,6 +5082,8 @@ TENSIX_EXECUTE_STALLWAIT() {
         wait_res &= ~0x800;
     }
 #else
+    TTSIM_VERIFY(!((wait_res & 0x8) && (p_tensix->pack_held_pipe == pipe + 1)), UndefinedBehavior,
+        "wait_res=0x%x waits on a packer that holds a non-last PACR's output, which never finishes", wait_res);
     wait_res &= ~0x1C1F; // never need to wait for ThCon memory requests, Unpack0/1, Pack, FPU, RISCV MMIO, SFPU, or Config
     if (wait_res & 0x20) {
         if (p_tensix->src_a_valid & (1 << p_tensix->src_a_unpack_bank)) {

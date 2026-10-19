@@ -244,6 +244,9 @@ struct TensixState {
 #if TT_ARCH_VERSION >= 1
     uint32_t src_a_format[2], src_b_format[2];
 #endif
+#if TT_ARCH_VERSION == 1
+    uint32_t pack_held_pipe; // 1 + the thread whose PACR output the packer holds until the next PACR, or 0
+#endif
     uint32_t src_a_rwc[TENSIX_INST_PIPES];
     uint32_t src_a_rwc_cr[TENSIX_INST_PIPES];
     uint32_t src_b_rwc[TENSIX_INST_PIPES];

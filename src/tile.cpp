@@ -404,12 +404,18 @@ static uint64_t board_id(uint32_t chip_id) {
 
 static uint32_t asic_location(uint32_t chip_id) {
 #if TT_ARCH_VERSION == 0
+#if NUM_CHIPS == 32
+    return 1 + (chip_id / 4); // WH Galaxy: 1-based slot within the tray (see pci_device_from_bdf)
+#else
     return chip_id;
+#endif
 #else
 #if NUM_CHIPS == 8
     return 0; // each P150 card has one ASIC
 #elif NUM_CHIPS == 4
     return 1 - (chip_id & 1);
+#elif NUM_CHIPS == 32
+    return 1 + (chip_id % 8); // BH Galaxy: 1-based slot within the tray (see pci_device_from_bdf)
 #else
     return chip_id;
 #endif

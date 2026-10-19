@@ -106,6 +106,32 @@ static uint32_t pci_device_from_bdf(uint32_t bus_device_function) {
     if (function) {
         return NUM_MMIO_CHIPS; // single-function endpoints; functions 1-7 are absent
     }
+#if NUM_CHIPS == 32
+    // Galaxy: chip N sits at the bus its cluster descriptor gives it. As on silicon,
+    // each ASIC is its own PCI bus at device 0; the bus's high nibble is the tray and
+    // its low nibble the 1-based ASIC slot.
+    static constexpr uint8_t CHIP_BUS[NUM_MMIO_CHIPS] = {
+#if TT_ARCH_VERSION == 0
+        0xC1, 0x41, 0x01, 0x81, 0xC2, 0x42, 0x02, 0x82,
+        0xC3, 0x43, 0x03, 0x83, 0xC4, 0x44, 0x04, 0x84,
+        0xC5, 0x45, 0x05, 0x85, 0xC6, 0x46, 0x06, 0x86,
+        0xC7, 0x47, 0x07, 0x87, 0xC8, 0x48, 0x08, 0x88,
+#elif TT_ARCH_VERSION == 1
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+        0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88,
+        0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8,
+#else
+#error unsupported
+#endif
+    };
+    for (uint32_t device = 0; device < NUM_MMIO_CHIPS; device++) {
+        if ((bus == CHIP_BUS[device]) && (bdf_device == 0)) {
+            return device;
+        }
+    }
+    return NUM_MMIO_CHIPS;
+#endif
     return (bus == 0 && (bdf_device < NUM_MMIO_CHIPS)) ? bdf_device : NUM_MMIO_CHIPS;
 }
 
