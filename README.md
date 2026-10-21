@@ -254,7 +254,7 @@ Not all hardware features are implemented, and the simulator is intentionally mo
 to help uncover potential issues. Simulator error messages are grouped into the following categories
 to indicate whether the simulator or the software being simulated is at fault (see
 [Simulator Error Handling](docs/sim_error_handling.md) for the full design rationale):
-- **UndefinedBehavior, UnpredictableValueUsed, NonContractualBehavior**: See
+- **UndefinedBehavior, UnpredictableValue, NonContractualBehavior**: See
   [tt-isa-documentation glossary](https://github.com/tenstorrent/tt-isa-documentation/blob/main/Glossary.md)
 - **UntestedFunctionality**: Feature is implemented but lacks sufficient test coverage to be enabled
 - **UnimplementedFunctionality**: Feature not yet implemented but planned for future support
@@ -307,13 +307,16 @@ affects the result. For example, floating-point reductions using addition will d
 addition is explicitly serialized in a deterministic order.
 
 ### Strictness vs. Silicon
-The simulator may report `UndefinedBehavior` or `UnpredictableValueUsed` for conditions that do not
+The simulator may report `UndefinedBehavior` or `UnpredictableValue` for conditions that do not
 produce visibly incorrect output on silicon under specific test workloads. This is by design.
 UndefinedBehavior is not equivalent to "the device halts on this input"; it is the specification's
 commitment that no behavior is guaranteed. Silicon executes some behavior on every input, and the
 absence of a visible failure in a particular test does not constitute a defined contract. The
 simulator's role is to flag the nonconformance at the point it occurs, before it propagates into a
 non-portable correctness failure under a different workload, format combination, or silicon revision.
+For `UnpredictableValue`, that point is where the value reaches architecturally visible state the
+simulator doesn't track (in practice, the instruction that wrote it), whether or not anything reads it
+later: past there, the simulator can no longer vouch for the run.
 
 When the simulator reports such a condition, the resolution is to fix the software path that triggered
 it. Suppressing or relaxing the simulator's check would convert a portable, locally detectable

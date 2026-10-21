@@ -16,9 +16,12 @@ owners can route fixes to the right place.
   violation.
 - `NonContractualBehavior` (NCB): software has depended on behavior the spec declares software
   must not depend on. Distinguishing this from UB is sometimes useful; the handling is the same.
-- `UnpredictableValueUsed` (UV): software has read a value that was not deterministically set (for
-  example, reading from a register without a prior write, in a context where the spec does not
-  guarantee any specific value).
+- `UnpredictableValue` (UV): a value the spec leaves unpredictable (for example, from a register
+  read without a prior write, in a context where the spec does not guarantee any specific value) has
+  reached architecturally visible state the simulator doesn't track, in practice at the instruction
+  that wrote it. The simulator stops at the last point where it can still vouch for the run. It
+  reports later only where it already has the information to, never promises the latest point, and
+  does no shadow tracking or X propagation.
 - `UnsupportedFunctionality`: a feature the simulator intentionally does not plan to implement
   without a strong justification for why the cost of implementation and testing is worthwhile.
 - `UnimplementedFunctionality`: a feature that should eventually be implemented in the simulator
