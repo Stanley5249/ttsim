@@ -166,7 +166,7 @@ sudo insmod tenstorrent.ko
 
 `qemu-system-aarch64` is also supported and will be faster on ARM-based host platforms.
 
-Quasar's host MMIO path is not implemented in libttsim and will not work end-to-end.
+On Quasar, libttsim implements the host MMIO path through its PCIe device's BARs. Its BAR4 is 512GB.
 
 ## Full-System Simulation with ttsim-riscv64
 Where the `libttsim.so` path models a Tenstorrent *chip*, **ttsim-riscv64** is the other face of

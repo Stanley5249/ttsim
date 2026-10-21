@@ -71,18 +71,19 @@ void     libttsim_pci_config_wr32(uint32_t bus_device_function, uint32_t offset,
 
 32-bit PCI configuration-space access. `bus_device_function` is the conventional 16-bit PCI tuple;
 bits above bit 15 are a fatal error. Endpoints are single-function, and an empty slot or a non-zero
-function reads all-ones (`0xFFFFFFFF`). Endpoints are not necessarily contiguous - the Wormhole
-and Blackhole Galaxy builds place each of their 32 chips on its own bus at device 0, matching the
-cluster descriptor's PCI buses (the bus's high nibble is the tray, its low nibble the 1-based ASIC
-slot) - so a host must probe every bus/device slot rather than stop at the first all-ones. Endpoints
-enumerate in bus order, which need not be chip order.
+function reads all-ones (`0xFFFFFFFF`). Most builds place their endpoints on bus 0, from device 0
+up, in chip order. The Wormhole and Blackhole Galaxy builds instead place each of their 32 chips on
+its own bus at device 0, matching the cluster descriptor's PCI buses (the bus's high nibble
+identifies the tray, its low nibble is the 1-based ASIC slot), and leave bus 0 empty. Endpoints are
+therefore not necessarily contiguous, so a host must probe every bus/device slot rather than stop at
+the first all-ones. Endpoints enumerate in bus order, which need not be chip order.
 
 `offset` must be 4-byte aligned; other values are fatal errors. The config read at offset 0 returns
 the vendor and device ID identifying the simulated chip; the BAR base-address registers are also
 readable, and each device's BARs occupy a distinct physical-address window (so the `paddr` passed
 to the memory-access functions identifies the target chip). `libttsim_pci_config_wr32` implements the
-writable registers (command/status, BARs) on Wormhole and Blackhole; writing an unimplemented offset,
-or a BDF holding no endpoint, is a fatal error.
+writable registers (command/status, BARs) on every chip; writing an unimplemented offset, or a BDF
+holding no endpoint, is a fatal error.
 
 ### Memory (BAR) access
 
@@ -113,12 +114,11 @@ void libttsim_tile_rd_bytes(uint32_t x, uint32_t y, uint64_t addr, void       *d
 void libttsim_tile_wr_bytes(uint32_t x, uint32_t y, uint64_t addr, const void *src, uint32_t size);
 ```
 
-Tile-relative memory access by `(x, y)` grid coordinate. These are **transitional** and exist only
-because Quasar's PCIe/BAR access path is not yet in place: on Quasar they are currently the required
-way to reach tile memory, while on Wormhole and Blackhole they are illegal and calling them fails as
-`UnsupportedFunctionality` (use the BAR access functions there instead). They will be removed once
-Quasar's PCIe path lands, at which point all chips use the BAR functions uniformly. Removal will
-follow the staged policy below.
+Tile-relative memory access by `(x, y)` grid coordinate. These are **transitional**: on Quasar they
+remain available alongside the BAR path, which reaches the same tile memory, while on Wormhole and
+Blackhole they are illegal and calling them fails as `UnsupportedFunctionality` (use the BAR access
+functions there instead). They stay for tt-umd; their removal is a later change, after which all
+chips use the BAR functions uniformly. Removal will follow the staged policy below.
 
 ## Hidden API: host-environment surface
 
