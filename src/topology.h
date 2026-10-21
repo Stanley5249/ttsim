@@ -3,22 +3,21 @@
 
 // Helpers and data for ethernet topology
 #pragma once
-#include "common.h"
+#include "sim.h"
+#include <span>
 
-// Compile-time inter-chip Ethernet peer table for this build configuration. Each row
-// maps (src chip, src eth tile) -> (dst chip, dst eth tile); a different topology
-// (n300, P300, QB/LB, Galaxy) supplies a different table and a larger NUM_CHIPS with
-// no other change. Links are listed in both directions. The eth tile index is the eth
-// channel (ETH_CORES_NOC0[chan]).
+// Inter-chip Ethernet peer tables, one per system. Each row maps (src chip, src eth tile)
+// -> (dst chip, dst eth tile); a different topology (n300, P300, QB/LB, Galaxy) supplies a
+// different table and chip count with no other change. Links are listed in both directions.
+// The eth tile index is the eth channel (ETH_CORES_NOC0[chan]).
 struct EthLink {
     uint8_t src_chip, src_tile, dst_chip, dst_tile;
 };
-#if NUM_CHIPS > 1
-static constexpr EthLink ETH_PEER_TABLE[] = {
 #if TT_ARCH_VERSION == 0
-#if NUM_CHIPS == 2
+static constexpr EthLink ETH_PEER_TABLE_N300[] = { // n300 = 2x Wormhole
     {0, 8, 1, 0}, {0, 9, 1, 1}, {1, 0, 0, 8}, {1, 1, 0, 9},
-#elif NUM_CHIPS == 8
+};
+static constexpr EthLink ETH_PEER_TABLE_T3000[] = { // wh_x8 = T3000 / LoudBox: 4 n300 cards, 4x2 mesh
     {0, 6, 2, 6},   {2, 6, 0, 6},     {0, 7, 2, 7},   {2, 7, 0, 7},
     {0, 8, 4, 0},   {4, 0, 0, 8},     {0, 9, 4, 1},   {4, 1, 0, 9},
     {0, 14, 1, 14}, {1, 14, 0, 14},   {0, 15, 1, 15}, {1, 15, 0, 15},
@@ -29,7 +28,9 @@ static constexpr EthLink ETH_PEER_TABLE[] = {
     {3, 8, 7, 0},   {7, 0, 3, 8},     {3, 9, 7, 1},   {7, 1, 3, 9},
     {4, 6, 5, 6},   {5, 6, 4, 6},     {4, 7, 5, 7},   {5, 7, 4, 7},
     {6, 6, 7, 6},   {7, 6, 6, 6},     {6, 7, 7, 7},   {7, 7, 6, 7},
-#elif NUM_CHIPS == 32
+};
+// wh_x32 = WH Galaxy 6U: 32 WH chips, 8x4 torus, all MMIO (from 6u_cluster_desc.yaml; each chip: 4 neighbors x 4 eth chans)
+static constexpr EthLink ETH_PEER_TABLE_WH_GALAXY[] = {
     {0, 0, 3, 0}, {0, 1, 3, 1}, {0, 2, 3, 2}, {0, 3, 3, 3}, {0, 4, 2, 4}, {0, 5, 2, 5}, {0, 6, 2, 6}, {0, 7, 2, 7},
     {0, 8, 4, 4}, {0, 9, 4, 5}, {0, 10, 4, 6}, {0, 11, 4, 7}, {0, 12, 16, 0}, {0, 13, 16, 1}, {0, 14, 16, 2}, {0, 15, 16, 3},
     {1, 0, 2, 0}, {1, 1, 2, 1}, {1, 2, 2, 2}, {1, 3, 2, 3}, {1, 4, 3, 4}, {1, 5, 3, 5}, {1, 6, 3, 6}, {1, 7, 3, 7},
@@ -94,16 +95,18 @@ static constexpr EthLink ETH_PEER_TABLE[] = {
     {30, 8, 28, 8}, {30, 9, 28, 9}, {30, 10, 28, 10}, {30, 11, 28, 11}, {30, 12, 29, 12}, {30, 13, 29, 13}, {30, 14, 29, 14}, {30, 15, 29, 15},
     {31, 0, 15, 12}, {31, 1, 15, 13}, {31, 2, 15, 14}, {31, 3, 15, 15}, {31, 4, 27, 8}, {31, 5, 27, 9}, {31, 6, 27, 10}, {31, 7, 27, 11},
     {31, 8, 29, 8}, {31, 9, 29, 9}, {31, 10, 29, 10}, {31, 11, 29, 11}, {31, 12, 28, 12}, {31, 13, 28, 13}, {31, 14, 28, 14}, {31, 15, 28, 15},
-#endif
+};
 #else
-#if NUM_CHIPS == 2
+static constexpr EthLink ETH_PEER_TABLE_P300[] = { // P300 = 2x Blackhole (cluster desc: c0.ch2<->c1.ch9, c0.ch3<->c1.ch8)
     {0, 2, 1, 9}, {0, 3, 1, 8}, {1, 9, 0, 2}, {1, 8, 0, 3},
-#elif NUM_CHIPS == 4
+};
+static constexpr EthLink ETH_PEER_TABLE_QUIETBOX_2[] = { // QuietBox 2 = two P300 cards, 2x2 mesh, all MMIO (probed from silicon)
     {0, 2, 3, 5}, {3, 5, 0, 2}, {0, 4, 3, 4}, {3, 4, 0, 4},
     {0, 8, 1, 3}, {1, 3, 0, 8}, {0, 9, 1, 2}, {1, 2, 0, 9},
     {1, 4, 2, 4}, {2, 4, 1, 4}, {1, 5, 2, 2}, {2, 2, 1, 5},
     {2, 8, 3, 3}, {3, 3, 2, 8}, {2, 9, 3, 2}, {3, 2, 2, 9},
-#elif NUM_CHIPS == 8
+};
+static constexpr EthLink ETH_PEER_TABLE_LOUDBOX[] = { // LoudBox = eight P150 cards (from blackhole_8xP150.yaml)
     {0, 4, 1, 9}, {0, 5, 4, 5}, {0, 6, 1, 11}, {0, 7, 4, 7}, {0, 8, 3, 5}, {0, 10, 3, 7},
     {1, 4, 5, 4}, {1, 6, 5, 6}, {1, 8, 2, 4}, {1, 9, 0, 4}, {1, 10, 2, 6}, {1, 11, 0, 6},
     {2, 4, 1, 8}, {2, 6, 1, 10}, {2, 8, 6, 8}, {2, 9, 3, 4}, {2, 10, 6, 10}, {2, 11, 3, 6},
@@ -112,7 +115,8 @@ static constexpr EthLink ETH_PEER_TABLE[] = {
     {5, 4, 1, 4}, {5, 6, 1, 6}, {5, 8, 6, 4}, {5, 9, 4, 4}, {5, 10, 6, 6}, {5, 11, 4, 6},
     {6, 4, 5, 8}, {6, 6, 5, 10}, {6, 8, 2, 8}, {6, 9, 7, 4}, {6, 10, 2, 10}, {6, 11, 7, 6},
     {7, 4, 6, 9}, {7, 5, 4, 8}, {7, 6, 6, 11}, {7, 7, 4, 10}, {7, 9, 3, 9}, {7, 11, 3, 11},
-#elif NUM_CHIPS == 32
+};
+static constexpr EthLink ETH_PEER_TABLE_BH_GALAXY[] = { // bh_x32 = 32 BH chips, 8x4 torus (from bh_x32_torus_xy_sim.yaml)
     {0, 0, 8, 0}, {0, 1, 8, 1}, {0, 2, 24, 2}, {0, 3, 24, 3}, {0, 4, 1, 2}, {0, 5, 1, 3}, {0, 6, 4, 0}, {0, 7, 4, 1},
     {1, 0, 9, 0}, {1, 1, 9, 1}, {1, 2, 0, 4}, {1, 3, 0, 5}, {1, 4, 2, 2}, {1, 5, 2, 3}, {1, 6, 5, 0}, {1, 7, 5, 1},
     {2, 0, 10, 0}, {2, 1, 10, 1}, {2, 2, 1, 4}, {2, 3, 1, 5}, {2, 4, 3, 2}, {2, 5, 3, 3}, {2, 6, 6, 0}, {2, 7, 6, 1},
@@ -145,7 +149,22 @@ static constexpr EthLink ETH_PEER_TABLE[] = {
     {29, 0, 25, 6}, {29, 1, 25, 7}, {29, 2, 28, 4}, {29, 3, 28, 5}, {29, 4, 30, 2}, {29, 5, 30, 3}, {29, 6, 21, 6}, {29, 7, 21, 7},
     {30, 0, 26, 6}, {30, 1, 26, 7}, {30, 2, 29, 4}, {30, 3, 29, 5}, {30, 4, 31, 2}, {30, 5, 31, 3}, {30, 6, 22, 6}, {30, 7, 22, 7},
     {31, 0, 27, 6}, {31, 1, 27, 7}, {31, 2, 30, 4}, {31, 3, 30, 5}, {31, 4, 7, 4}, {31, 5, 7, 5}, {31, 6, 23, 6}, {31, 7, 23, 7},
-#endif
-#endif
 };
 #endif
+
+// The peer table of the simulated system (empty for a single chip)
+static inline std::span<const EthLink> eth_peer_table() {
+    switch (g_num_chips) {
+#if TT_ARCH_VERSION == 0
+        case 2: return ETH_PEER_TABLE_N300;
+        case 8: return ETH_PEER_TABLE_T3000;
+        case 32: return ETH_PEER_TABLE_WH_GALAXY;
+#else
+        case 2: return ETH_PEER_TABLE_P300;
+        case 4: return ETH_PEER_TABLE_QUIETBOX_2;
+        case 8: return ETH_PEER_TABLE_LOUDBOX;
+        case 32: return ETH_PEER_TABLE_BH_GALAXY;
+#endif
+        default: return {};
+    }
+}

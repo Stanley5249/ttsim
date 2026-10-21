@@ -57,7 +57,7 @@
     },
     {
       "base": "0xFFB40000",
-      "limit": "0xFFB40000",
+      "limit": "0xFFB7FFFF",
       "name": "noc_overlay"
     },
     {
@@ -997,6 +997,22 @@
           "name": "noc_clear_outstanding_req_cnt"
         },
         {
+          "offset": "0x64",
+          "rw": "ro",
+          "reset_value": null,
+          "name": "noc_cmd_buf_avail",
+          "array_size": 4,
+          "array_stride": "0x800"
+        },
+        {
+          "offset": "0x68",
+          "rw": "ro",
+          "reset_value": null,
+          "name": "noc_cmd_buf_ovfl",
+          "array_size": 4,
+          "array_stride": "0x800"
+        },
+        {
           "offset": "0x100",
           "rw": "rw",
           "reset_value": "0x00000000",
@@ -1212,8 +1228,27 @@
       ]
     },
     {
+      "name": "tensix_regfile",
+      "regs": [
+        {
+          "offset": "0x0",
+          "rw": "rw",
+          "reset_value": null,
+          "name": "gpr",
+          "array_size": 64,
+          "array_stride": "0x4"
+        }
+      ]
+    },
+    {
       "name": "tensix_pc_buf",
       "regs": [
+        {
+          "offset": "0x0",
+          "rw": "rw",
+          "reset_value": "0x00000000",
+          "name": "pc"
+        },
         {
           "offset": "0x4",
           "rw": "rw",
@@ -1232,6 +1267,19 @@
           "reset_value": "0x00000000",
           "name": "semaphore",
           "array_size": 8,
+          "array_stride": "0x4"
+        }
+      ]
+    },
+    {
+      "name": "tensix_mop_cfg",
+      "regs": [
+        {
+          "offset": "0x0",
+          "rw": "wo",
+          "reset_value": null,
+          "name": "loop",
+          "array_size": 9,
           "array_stride": "0x4"
         }
       ]

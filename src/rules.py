@@ -71,6 +71,29 @@ def rules(ctx):
         ctx.rule(target, [script, dep], cmd=['python3', script, '--chip', chip, '--out', target])
         chip_gen_h_files[chip] += [target]
 
+    # Everything but sim.cpp, which holds the chip count, is built once per chip and shared by its configs.
+    shared_o_files = {}
+    for (tt_arch_version, chip) in CHIPS:
+        for config in config_compile_opts:
+            out_dir = f'_out/{config}_{chip}'
+            gcc_opts = [
+                *compile_opts,
+                *config_compile_opts[config],
+                f'-DTT_ARCH_VERSION={tt_arch_version}',
+                f'-I_out/{chip}',
+            ]
+
+            c_files = ['libttsim.cpp', 'pcie.cpp', 'common.cpp', 'rv32.cpp', 'tensix.cpp', 'tile.cpp']
+
+            o_files = []
+            for file in c_files:
+                o_file = f'{out_dir}/{file.replace(".cpp", ".o")}'
+                d_file = o_file.replace('.o', '.d')
+                cmd = ['g++', *gcc_opts, '-c', file, '-o', o_file]
+                ctx.rule(o_file, file, cmd=cmd, depfile=d_file, order_only_inputs=chip_gen_h_files[chip])
+                o_files += [o_file]
+            shared_o_files[config, chip] = o_files
+
     build_targets = []
     for (tt_arch_version, chip, data_chip, num_chips, num_mmio_chips) in CONFIGS:
         if chip == 'bh_x32' and ctx.host.arch != 'x86_64':
@@ -89,15 +112,11 @@ def rules(ctx):
             if num_chips >= 16 and ctx.host.arch == 'x86_64':
                 gcc_opts += ['-mcmodel=medium'] # required for >2GB BSS in very large (Galaxy) sims
 
-            c_files = ['libttsim.cpp', 'pcie.cpp', 'common.cpp', 'rv32.cpp', 'sim.cpp', 'tensix.cpp', 'tile.cpp']
-
-            o_files = []
-            for file in c_files:
-                o_file = f'{out_dir}/{file.replace(".cpp", ".o")}'
-                d_file = o_file.replace('.o', '.d')
-                cmd = ['g++', *gcc_opts, '-c', file, '-o', o_file]
-                ctx.rule(o_file, file, cmd=cmd, depfile=d_file, order_only_inputs=chip_gen_h_files[data_chip])
-                o_files += [o_file]
+            o_file = f'{out_dir}/sim.o'
+            d_file = o_file.replace('.o', '.d')
+            cmd = ['g++', *gcc_opts, '-c', 'sim.cpp', '-o', o_file]
+            ctx.rule(o_file, 'sim.cpp', cmd=cmd, depfile=d_file, order_only_inputs=chip_gen_h_files[data_chip])
+            o_files = [*shared_o_files[config, data_chip], o_file]
 
             target = f'{out_dir}/libttsim.so'
             link_so_deps = o_files

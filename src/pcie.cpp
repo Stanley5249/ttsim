@@ -155,7 +155,7 @@ static uint32_t *iatu_reg_field(uint32_t offset) {
 }
 
 void pcie_init() {
-    for (uint32_t d = 0; d < NUM_MMIO_CHIPS; d++) {
+    for (uint32_t d = 0; d < g_num_mmio_chips; d++) {
         // Each MMIO device's BARs live in its own host-physical window (see PER_DEVICE_PADDR_STRIDE).
         uint64_t off = uint64_t(d) * PER_DEVICE_PADDR_STRIDE;
         PcieTile *p_tile = &g_chips[d].p_tile;
@@ -482,16 +482,16 @@ static bool pcie_bar_decode(const PcieTile *p_tile, uint64_t paddr, uint32_t siz
 }
 
 uint32_t pcie_device_from_paddr(uint64_t paddr, uint32_t size) {
-    uint32_t device = NUM_MMIO_CHIPS;
-    for (uint32_t d = 0; d < NUM_MMIO_CHIPS; d++) {
+    uint32_t device = g_num_mmio_chips;
+    for (uint32_t d = 0; d < g_num_mmio_chips; d++) {
         uint32_t bar;
         uint64_t offset;
         if (pcie_bar_decode(&g_chips[d].p_tile, paddr, size, &bar, &offset)) {
-            TTSIM_VERIFY(device == NUM_MMIO_CHIPS, UndefinedBehavior, "paddr=0x%llx size=%d hits device %u and device %u", paddr, size, device, d);
+            TTSIM_VERIFY(device == g_num_mmio_chips, UndefinedBehavior, "paddr=0x%llx size=%d hits device %u and device %u", paddr, size, device, d);
             device = d;
         }
     }
-    TTSIM_VERIFY(device < NUM_MMIO_CHIPS, UndefinedBehavior, "paddr=0x%llx size=%d", paddr, size);
+    TTSIM_VERIFY(device < g_num_mmio_chips, UndefinedBehavior, "paddr=0x%llx size=%d", paddr, size);
     return device;
 }
 

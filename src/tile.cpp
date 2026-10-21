@@ -24,41 +24,37 @@ static inline auto get_tile(uint32_t tile_id) {
     }
 }
 
-static constexpr uint32_t logical_harvesting_mask(uint32_t chip_id) {
-    TTSIM_ASSERT(chip_id < NUM_CHIPS);
+static uint32_t logical_harvesting_mask(uint32_t chip_id) {
+    TTSIM_ASSERT(chip_id < g_num_chips);
 #if TT_ARCH_VERSION == 0
-#if NUM_CHIPS == 1
-    constexpr uint32_t LOGICAL_HARVESTING_MASKS[] = {0x40}; // N150
-#elif NUM_CHIPS == 2
-    constexpr uint32_t LOGICAL_HARVESTING_MASKS[] = {0x41, 0x05}; // N300
-#elif NUM_CHIPS == 8
-    constexpr uint32_t LOGICAL_HARVESTING_MASKS[] = {
-        0x220, 0x201, 0x280, 0x201, 0x240, 0x201, 0x201, 0x210};
-#elif NUM_CHIPS == 32
-    constexpr uint32_t LOGICAL_HARVESTING_MASKS[NUM_CHIPS] = {}; // WH Galaxy
+    static constexpr uint32_t N150[] = {0x40};
+    static constexpr uint32_t N300[] = {0x41, 0x05};
+    static constexpr uint32_t T3000[] = {0x220, 0x201, 0x280, 0x201, 0x240, 0x201, 0x201, 0x210};
+    switch (g_num_chips) {
+        case 1: return N150[chip_id];
+        case 2: return N300[chip_id];
+        case 8: return T3000[chip_id];
+        case 32: return 0; // WH Galaxy
+        default: TTSIM_ERROR(ConfigurationError, "unsupported Wormhole topology: num_chips=%d", g_num_chips);
+    }
 #else
-#error unsupported Wormhole topology
-#endif
-    return LOGICAL_HARVESTING_MASKS[chip_id];
-#else
-#if NUM_CHIPS == 1
-    constexpr uint32_t LOGICAL_HARVESTING_MASKS[] = {0xC0}; // P150
-#elif NUM_CHIPS == 2
-    constexpr uint32_t LOGICAL_HARVESTING_MASKS[] = {0x2080, 0x110}; // P300
-#elif NUM_CHIPS == 4
-    constexpr uint32_t LOGICAL_HARVESTING_MASKS[] = {0x201, 0x12, 0x300, 0x900}; // QuietBox 2
-#elif NUM_CHIPS == 8
-    constexpr uint32_t LOGICAL_HARVESTING_MASKS[NUM_CHIPS] = {}; // LoudBox P150
-#elif NUM_CHIPS == 32
-    constexpr uint32_t LOGICAL_HARVESTING_MASKS[] = {
+    static constexpr uint32_t P150[] = {0xC0};
+    static constexpr uint32_t P300[] = {0x2080, 0x110};
+    static constexpr uint32_t QUIETBOX_2[] = {0x201, 0x12, 0x300, 0x900};
+    static constexpr uint32_t LOUDBOX[] = {0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80}; // blackhole_8xP150.yaml
+    static constexpr uint32_t BH_GALAXY[] = {
         0x40,  0x80, 0x200,  0x2000, 0x20,   0x20,  0x4,   0x1,
         0x8,   0x1,  0x800,  0x2,    0x20,   0x200, 0x800, 0x8,
         0x2,   0x4,  0x20,   0x2,    0x1000, 0x40,  0x200, 0x20,
-        0x100, 0x10, 0x2000, 0x4,    0x80,   0x100, 0x100, 0x20}; // BH Galaxy
-#else
-#error unsupported Blackhole topology
-#endif
-    return LOGICAL_HARVESTING_MASKS[chip_id];
+        0x100, 0x10, 0x2000, 0x4,    0x80,   0x100, 0x100, 0x20};
+    switch (g_num_chips) {
+        case 1: return P150[chip_id];
+        case 2: return P300[chip_id];
+        case 4: return QUIETBOX_2[chip_id];
+        case 8: return LOUDBOX[chip_id];
+        case 32: return BH_GALAXY[chip_id];
+        default: TTSIM_ERROR(ConfigurationError, "unsupported Blackhole topology: num_chips=%d", g_num_chips);
+    }
 #endif
 }
 
@@ -272,17 +268,15 @@ void t_tile_init(uint32_t tile_id) {
 }
 
 // Look up the inter-chip Ethernet peer of (current chip, tile_id). Returns false when
-// the tile has no peer (single-chip builds have no table; an unconnected tile misses).
+// the tile has no peer (a single chip has no table; an unconnected tile misses).
 static bool eth_peer(uint32_t tile_id, uint32_t *p_chip_id, uint32_t *p_tile_id) {
-#if NUM_CHIPS > 1
-    for (const EthLink &link : ETH_PEER_TABLE) {
+    for (const EthLink &link: eth_peer_table()) {
         if ((link.src_chip == g_current_chip_id) && (link.src_tile == tile_id)) {
             *p_chip_id = link.dst_chip;
             *p_tile_id = link.dst_tile;
             return true;
         }
     }
-#endif
     return false;
 }
 
@@ -378,64 +372,55 @@ void p_tile_init() {
 
 static uint64_t board_id(uint32_t chip_id) {
 #if TT_ARCH_VERSION == 0
-#if NUM_CHIPS == 1
-    return (uint64_t(0x180) << 32) | 1; // N150
-#elif NUM_CHIPS == 32
-    return (uint64_t(0x350) << 32) | 1; // WH Galaxy
+    switch (g_num_chips) {
+        case 1: return (uint64_t(0x180) << 32) | 1; // N150
+        case 32: return (uint64_t(0x350) << 32) | 1; // WH Galaxy
+        default: {
+            constexpr uint64_t N300_BOARD_ID = uint64_t(0x01000146) << 32 | 0x118320AE;
+            uint32_t serial_offset = (g_num_chips > g_num_mmio_chips) ? (chip_id % g_num_mmio_chips) : 0;
+            return N300_BOARD_ID + serial_offset;
+        }
+    }
 #else
-    constexpr uint64_t N300_BOARD_ID = uint64_t(0x01000146) << 32 | 0x118320AE;
-    uint32_t serial_offset = (NUM_CHIPS > NUM_MMIO_CHIPS) ? chip_id % NUM_MMIO_CHIPS : 0;
-    return N300_BOARD_ID + serial_offset;
-#endif
-#else
-#if NUM_CHIPS == 1
-    return (uint64_t(0x400) << 32) | 1; // P150
-#elif NUM_CHIPS == 4
-    return ((uint64_t(0x440) << 32) | 1) + (chip_id / 2); // QuietBox 2: two P300 cards
-#elif NUM_CHIPS == 8
-    return (uint64_t(0x400) << 32) | (1 + chip_id); // LoudBox: eight P150 cards
-#elif NUM_CHIPS == 32
-    return (uint64_t(0x470) << 32) | 1; // BH Galaxy
-#else
-    return (uint64_t(0x440) << 32) | 1; // P300
-#endif
+    switch (g_num_chips) {
+        case 1: return (uint64_t(0x400) << 32) | 1; // P150
+        case 4: return ((uint64_t(0x440) << 32) | 1) + (chip_id / 2); // QuietBox 2: two P300 cards
+        case 8: return (uint64_t(0x400) << 32) | (1 + chip_id); // LoudBox: eight P150 cards
+        case 32: return (uint64_t(0x470) << 32) | 1; // BH Galaxy
+        default: return (uint64_t(0x440) << 32) | 1; // P300
+    }
 #endif
 }
 
 static uint32_t asic_location(uint32_t chip_id) {
 #if TT_ARCH_VERSION == 0
-#if NUM_CHIPS == 32
-    return 1 + (chip_id / 4); // WH Galaxy: 1-based slot within the tray (see pci_device_from_bdf)
+    switch (g_num_chips) {
+        case 32: return 1 + (chip_id / 4); // WH Galaxy: 1-based slot within the tray (see pci_device_from_bdf)
+        default: return chip_id;
+    }
 #else
-    return chip_id;
-#endif
-#else
-#if NUM_CHIPS == 8
-    return 0; // each P150 card has one ASIC
-#elif NUM_CHIPS == 4
-    return 1 - (chip_id & 1);
-#elif NUM_CHIPS == 32
-    return 1 + (chip_id % 8); // BH Galaxy: 1-based slot within the tray (see pci_device_from_bdf)
-#else
-    return chip_id;
-#endif
+    switch (g_num_chips) {
+        case 8: return 0; // each P150 card has one ASIC
+        case 4: return 1 - (chip_id & 1);
+        case 32: return 1 + (chip_id % 8); // BH Galaxy: 1-based slot within the tray (see pci_device_from_bdf)
+        default: return chip_id;
+    }
 #endif
 }
 
 #if TT_ARCH_VERSION == 1
 static uint32_t pcie_usage(uint32_t chip_id) {
-#if NUM_CHIPS == 8
-    return 1; // each P150 uses its PCIe0 endpoint
-#elif NUM_CHIPS <= 4
-    return asic_location(chip_id) ? 4 : 1; // the P300's loc-1 ASIC owns the x4 link
-#else
-    return (chip_id & 1) ? 4 : 1;
-#endif
+    if (g_num_chips == 8) {
+        return 1; // each P150 uses its PCIe0 endpoint
+    } else if (g_num_chips <= 4) {
+        return asic_location(chip_id) ? 4 : 1; // the P300's loc-1 ASIC owns the x4 link
+    } else {
+        return (chip_id & 1) ? 4 : 1;
+    }
 }
 #endif
 
 #if TT_ARCH_VERSION == 0
-#if NUM_CHIPS > 1
 static uint32_t wh_mangled_board_id(uint32_t chip_id) {
     uint64_t id = board_id(chip_id);
     return ((id >> 4) & 0xF0000000) | (id & 0x0FFFFFFF);
@@ -445,12 +430,11 @@ static uint32_t wh_mangled_board_id(uint32_t chip_id) {
 // 48-53/54-59) to a chip id. Must match the cluster descriptor's chips: [x, y, ...] coords.
 // n300 is a single row (id == chip_x); the 4x2 mesh (wh_x8/T3000) needs the 2-D grid.
 static uint32_t chip_coord_to_id(uint32_t chip_x, uint32_t chip_y) {
-#if NUM_CHIPS == 8
-    static constexpr uint8_t GRID[4][2] = {{4, 5}, {0, 1}, {2, 3}, {6, 7}};  // [chip_x][chip_y]
-    return (chip_x < 4 && chip_y < 2) ? GRID[chip_x][chip_y] : NUM_CHIPS;
-#else
-    return chip_y ? NUM_CHIPS : chip_x;
-#endif
+    if (g_num_chips == 8) { // wh_x8 = T3000 4x2 mesh (see tests/host/wh_x8_cluster_t3000_sim.yaml)
+        static constexpr uint8_t GRID[4][2] = {{4, 5}, {0, 1}, {2, 3}, {6, 7}};  // [chip_x][chip_y]
+        return (chip_x < 4 && chip_y < 2) ? GRID[chip_x][chip_y] : g_num_chips;
+    }
+    return chip_y ? g_num_chips : chip_x; // n300: single row of chips, id == chip_x
 }
 
 static uint32_t chip_id_to_coord(uint32_t chip_id) {
@@ -470,7 +454,7 @@ static void eth_fw_write_topology_tables(uint32_t tile_id) {
     uint8_t *sram = &g_e_tiles[tile_id].sram[0];
     uint32_t n = 0;
     // Route forward table: The sibling eth tiles that are directly connected to the remote chip
-    for (const EthLink &link : ETH_PEER_TABLE) {
+    for (const EthLink &link: eth_peer_table()) {
         if (link.src_chip != g_current_chip_id) {
             continue;
         }
@@ -480,11 +464,11 @@ static void eth_fw_write_topology_tables(uint32_t tile_id) {
     }
     mem_wr<uint32_t>(&sram[ETH_FW_ROUTE_TABLE_ADDR], n);
 
-    // Broadcast forward table: the distinct tunneled-remote peer chips (id >= NUM_MMIO_CHIPS) this chip
+    // Broadcast forward table: the distinct tunneled-remote peer chips (id >= g_num_mmio_chips) this chip
     // forwards an eth broadcast to. MMIO-sibling peers are excluded here.
     uint32_t bn = 0;
-    for (const EthLink &link : ETH_PEER_TABLE) {
-        if (link.src_chip != g_current_chip_id || link.dst_chip < NUM_MMIO_CHIPS) {
+    for (const EthLink &link: eth_peer_table()) {
+        if (link.src_chip != g_current_chip_id || link.dst_chip < g_num_mmio_chips) {
             continue;
         }
         uint32_t coord = chip_id_to_coord(link.dst_chip);
@@ -508,7 +492,6 @@ static constexpr uint32_t eth_jal_x0(uint32_t target) {
     return 0x6Fu | (((target >> 20) & 1) << 31) | (((target >> 1) & 0x3FF) << 21) |
            (((target >> 11) & 1) << 20) | (((target >> 12) & 0xFF) << 12);
 }
-#endif
 
 // Fake the eth link-training / boot_results state that UMD topology discovery reads, so
 // the n300's two chips present as a trained, connected pair. This is faithful
@@ -516,7 +499,9 @@ static constexpr uint32_t eth_jal_x0(uint32_t target) {
 // transport is modeled separately), derived from the same ETH_PEER_TABLE used for
 // delivery so the advertised topology cannot drift from the routed one.
 static void wh_x2_eth_link_init(uint32_t tile_id) {
-#if NUM_CHIPS > 1
+    if (g_num_chips == 1) {
+        return;
+    }
     constexpr uint32_t eth_fw_base = 0x13000;
     constexpr uint32_t eth_fw_scratch_base = 0x14800;
     EthTile *p_tile = &g_e_tiles[tile_id];
@@ -532,7 +517,7 @@ static void wh_x2_eth_link_init(uint32_t tile_id) {
     if (eth_peer(tile_id, &remote_chip_id, &remote_eth_id)) {
         p_tile->ierisc_reset_pc = eth_fw_base;
         mem_wr<uint32_t>(&p_tile->sram[0x1104], 1); // ETH_TRAIN_STATUS_ADDR = LINK_TRAIN_SUCCESS
-        mem_wr<uint32_t>(&p_tile->sram[0x104C], NUM_CHIPS == 32); // ROUTING_FIRMWARE_STATE: 1 = disabled on 6U
+        mem_wr<uint32_t>(&p_tile->sram[0x104C], g_num_chips == 32); // ROUTING_FIRMWARE_STATE: 1 = disabled on 6U
         mem_wr<uint32_t>(&p_tile->sram[0x1EC0 + 4 * 64], wh_mangled_board_id(g_current_chip_id)); // local board id lo
         mem_wr<uint32_t>(&p_tile->sram[0x1EC0 + 4 * 65], g_current_chip_id); // local ASIC id hi
         mem_wr<uint32_t>(&p_tile->sram[0x1EC0 + 4 * 72], wh_mangled_board_id(remote_chip_id)); // remote board id lo
@@ -547,14 +532,15 @@ static void wh_x2_eth_link_init(uint32_t tile_id) {
             ((remote_coord & 0x3F) << 16) | (((remote_coord >> 6) & 0x3F) << 22)); // NODE_INFO remote x[21:16] y[27:22]
         mem_wr<uint32_t>(&p_tile->sram[0x1100 + 4 * 10], 0); // NODE_INFO remote rack[7:0] shelf[15:8] (both 0)
     }
-#endif
 }
 #endif
 
 #if TT_ARCH_VERSION == 1
 // Boot the mock eth base FW
 static void bh_eth_link_init(uint32_t tile_id) {
-#if NUM_CHIPS > 1
+    if (g_num_chips == 1) {
+        return;
+    }
     EthTile *p_tile = &g_e_tiles[tile_id];
     uint32_t remote_chip = 0, remote_eth = 0;
     bool peered = eth_peer(tile_id, &remote_chip, &remote_eth);
@@ -566,7 +552,7 @@ static void bh_eth_link_init(uint32_t tile_id) {
     if (peered) {
         mem_wr<uint32_t>(&p_tile->sram[0x7CC04], 1); // eth_status.port_status = PORT_UP
         // The fw's chip_info inputs (layout per fw/eth/bh_eth_fw.c). The one committed fw image
-        // serves every Blackhole config, so anything NUM_CHIPS-dependent is resolved here.
+        // serves every Blackhole config, so anything that depends on the chip count is resolved here.
         constexpr uint32_t LOCAL = 0x75FC8, REMOTE = LOCAL + 24; // must match fw/eth/bh_eth_fw.c
         uint64_t local_board_id = board_id(g_current_chip_id);
         uint64_t remote_board_id = board_id(remote_chip);
@@ -582,18 +568,13 @@ static void bh_eth_link_init(uint32_t tile_id) {
         mem_wr<uint32_t>(&p_tile->sram[REMOTE + 12], uint32_t(remote_board_id)); // board_id_lo
         mem_wr<uint32_t>(&p_tile->sram[REMOTE + 16], 0); // asic_id_hi
         mem_wr<uint32_t>(&p_tile->sram[REMOTE + 20], 1 + remote_chip); // asic_id_lo
-#if NUM_CHIPS == 8
         // P150 base FW before 18.12 numbers logical channels after the four PCIe SerDes channels.
-        mem_wr<uint32_t>(&p_tile->sram[REMOTE + 24], remote_eth - 4); // logical_eth_id
-#else
-        mem_wr<uint32_t>(&p_tile->sram[REMOTE + 24], remote_eth); // logical_eth_id
-#endif
+        mem_wr<uint32_t>(&p_tile->sram[REMOTE + 24], (g_num_chips == 8) ? (remote_eth - 4) : remote_eth); // logical_eth_id
     }
     ttsim_rv32_set_core_active('E', tile_id, 0, true);
     p_tile->rv32[0].pc = eth_fw_base;
     p_tile->ierisc_reset_pc = eth_fw_base; // also the restart PC; 0 stays the "no base fw" guard
     p_tile->soft_reset_0 &= ~0x800u;
-#endif
 }
 
 static uint32_t tensix_enabled_column_telemetry() {
@@ -1353,6 +1334,19 @@ static uint32_t noc_regs_rd32(uint32_t tile_id, uint32_t noc_instance, uint32_t 
         case NOC_REGS_NOC_CMD_CTRL(2):
         case NOC_REGS_NOC_CMD_CTRL(3):
             return 0; // always return "done" right now
+#if TT_ARCH_VERSION == 1
+        case NOC_REGS_NOC_CMD_BUF_AVAIL(0):
+        case NOC_REGS_NOC_CMD_BUF_AVAIL(1):
+        case NOC_REGS_NOC_CMD_BUF_AVAIL(2):
+        case NOC_REGS_NOC_CMD_BUF_AVAIL(3):
+            // free FIFO entries, a byte per command buffer (0 with the FIFOs off); always 16, as commands complete when issued
+            return bits<16,16>(p_tile->base.niu_cfg_0[noc_instance]) ? 0x10101010 : 0;
+        case NOC_REGS_NOC_CMD_BUF_OVFL(0):
+        case NOC_REGS_NOC_CMD_BUF_OVFL(1):
+        case NOC_REGS_NOC_CMD_BUF_OVFL(2):
+        case NOC_REGS_NOC_CMD_BUF_OVFL(3):
+            return 0;
+#endif
         case NOC_REGS_NIU_MST_ATOMIC_RESP_RECEIVED: return p_tile->niu_mst_atomic_resp_received[noc_instance];
         case NOC_REGS_NIU_MST_WR_ACK_RECEIVED: return p_tile->niu_mst_wr_ack_received[noc_instance];
         case NOC_REGS_NIU_MST_RD_RESP_RECEIVED: return p_tile->niu_mst_rd_resp_received[noc_instance];
@@ -1825,22 +1819,30 @@ static void tensix_mop_cfg_wr32(uint32_t tile_id, uint32_t riscv_id, uint32_t of
     auto [tensix_id, pipe] = trisc_pipe(riscv_id);
     TTSIM_VERIFY(!(offset & 3), AssertionFailure, "misaligned offset=0x%x", offset);
     switch (offset / 4) {
-        case 0x0 / 4 ... 0x20 / 4:
-            p_tile->tensix[tensix_id].mop_cfg[pipe][offset / 4] = data;
+        case TENSIX_MOP_CFG_LOOP(0) / 4 ... TENSIX_MOP_CFG_LOOP(8) / 4:
+            p_tile->tensix[tensix_id].mop_cfg[pipe][(offset - TENSIX_MOP_CFG_LOOP(0)) / 4] = data;
             break;
         default:
             TTSIM_ERROR(UnimplementedFunctionality, "offset=0x%x", offset);
     }
 }
 
+// BRISC's window also holds threads 1 and 2's GPRs at offsets 0x100 and 0x200 (address bits 9:8 pick the thread);
+// those are legal accesses, not modeled.
+static void tensix_regfile_check_brisc(uint32_t riscv_id, uint32_t offset) {
+    TTSIM_VERIFY((riscv_id != RV32_ID_BRISC) || (offset < 0x100) || (offset >= 0x300), UnsupportedFunctionality,
+        "BRISC access to thread %d GPRs, offset=0x%x", offset >> 8, offset);
+}
+
 static uint32_t tensix_regfile_rd32(uint32_t tile_id, uint32_t riscv_id, uint32_t offset) {
     TensixTile *p_tile = &g_t_tiles[tile_id];
+    tensix_regfile_check_brisc(riscv_id, offset);
     riscv_id = (riscv_id == RV32_ID_BRISC) ? RV32_ID_TRISC0 : riscv_id;
     auto [tensix_id, pipe] = trisc_pipe(riscv_id);
     TTSIM_VERIFY(!(offset & 3), AssertionFailure, "misaligned offset=0x%x", offset);
     switch (offset / 4) {
-        case 0x0 / 4 ... 0xFC / 4:
-            return p_tile->tensix[tensix_id].dma_regs[pipe][offset / 4];
+        case TENSIX_REGFILE_GPR(0) / 4 ... TENSIX_REGFILE_GPR(63) / 4:
+            return p_tile->tensix[tensix_id].dma_regs[pipe][(offset - TENSIX_REGFILE_GPR(0)) / 4];
         default:
             TTSIM_ERROR(UndefinedBehavior, "offset=0x%x", offset);
     }
@@ -1848,12 +1850,13 @@ static uint32_t tensix_regfile_rd32(uint32_t tile_id, uint32_t riscv_id, uint32_
 
 static void tensix_regfile_wr32(uint32_t tile_id, uint32_t riscv_id, uint32_t offset, uint32_t data) {
     TensixTile *p_tile = &g_t_tiles[tile_id];
+    tensix_regfile_check_brisc(riscv_id, offset);
     riscv_id = (riscv_id == RV32_ID_BRISC) ? RV32_ID_TRISC0 : riscv_id;
     auto [tensix_id, pipe] = trisc_pipe(riscv_id);
     TTSIM_VERIFY(!(offset & 3), AssertionFailure, "misaligned offset=0x%x", offset);
     switch (offset / 4) {
-        case 0x0 / 4 ... 0xFC / 4:
-            p_tile->tensix[tensix_id].dma_regs[pipe][offset / 4] = data;
+        case TENSIX_REGFILE_GPR(0) / 4 ... TENSIX_REGFILE_GPR(63) / 4:
+            p_tile->tensix[tensix_id].dma_regs[pipe][(offset - TENSIX_REGFILE_GPR(0)) / 4] = data;
             break;
         default:
             TTSIM_ERROR(UndefinedBehavior, "offset=0x%x", offset);
@@ -1880,10 +1883,21 @@ static std::pair<bool, uint32_t> tensix_pc_buf_rd32(uint32_t tile_id, uint32_t r
     TensixTile *p_tile = &g_t_tiles[tile_id];
     TTSIM_VERIFY(!(offset & 3), AssertionFailure, "misaligned offset=0x%x", offset);
     switch (offset / 4) {
+        case TENSIX_PC_BUF_PC / 4:
+            // Retrying the read changes nothing, so stop stepping the core
+            p_tile->rv32_cores_active &= ~(1 << riscv_id);
+            p_tile->rv32_cores_parked |= 1 << riscv_id;
+            return {false, 0}; // stall until a PC is pushed, i.e. forever, as pushes are unimplemented
         case TENSIX_PC_BUF_TENSIX_SYNC / 4:
             if (!tensix_thread_idle(&p_tile->tensix[tensix_id], pipe)) {
                 return {false, 0}; // stall until previously issued Tensix instructions from this thread have finished
             }
+#if TT_ARCH_VERSION == 0
+            // An idle thread's STALLWAIT on its own units has been released, though a SEMWAIT may still be latched
+            if (!p_tile->tensix[tensix_id].wait_sems[pipe]) {
+                p_tile->tensix[tensix_id].wait_block[pipe] = 0;
+            }
+#endif
             return {true, 0};
         case TENSIX_PC_BUF_MOP_SYNC / 4:
             return {tensix_mop_expander_idle(&p_tile->tensix[tensix_id], pipe), 0}; // stall until done expanding MOPs
@@ -2177,7 +2191,7 @@ static std::pair<bool, uint32_t> t_tile_mmio_rd32(uint32_t tile_id, uint32_t ris
             return {true, noc_regs_rd32<'T'>(tile_id, 0, addr - NOC0_REGS_BASE)};
         case NOC1_REGS_BASE ... NOC1_REGS_LIMIT:
             return {true, noc_regs_rd32<'T'>(tile_id, 1, addr - NOC1_REGS_BASE)};
-        case NOC_OVERLAY_BASE ... NOC_OVERLAY_BASE + 0x3FFFF:
+        case NOC_OVERLAY_BASE ... NOC_OVERLAY_LIMIT:
             return {true, noc_overlay_rd32<'T'>(tile_id, addr - NOC_OVERLAY_BASE)};
 #if TT_ARCH_VERSION >= 1
         case TENSIX_DST_BASE ... TENSIX_DST_LIMIT: {
@@ -2225,7 +2239,7 @@ static bool t_tile_mmio_wr32(uint32_t tile_id, uint32_t riscv_id, uint64_t addr,
         case NOC1_REGS_BASE ... NOC1_REGS_LIMIT:
             noc_regs_wr32<'T'>(tile_id, 1, addr - NOC1_REGS_BASE, data);
             return true;
-        case NOC_OVERLAY_BASE ... NOC_OVERLAY_BASE + 0x3FFFF:
+        case NOC_OVERLAY_BASE ... NOC_OVERLAY_LIMIT:
             noc_overlay_wr32<'T'>(tile_id, addr - NOC_OVERLAY_BASE, data);
             return true;
         case TENSIX_MOP_CFG_BASE ... TENSIX_MOP_CFG_LIMIT:
@@ -2288,7 +2302,7 @@ static uint32_t e_tile_mmio_rd32(uint32_t tile_id, uint64_t addr) {
             return noc_regs_rd32<'E'>(tile_id, 0, addr - NOC0_REGS_BASE);
         case NOC1_REGS_BASE ... NOC1_REGS_LIMIT:
             return noc_regs_rd32<'E'>(tile_id, 1, addr - NOC1_REGS_BASE);
-        case NOC_OVERLAY_BASE ... NOC_OVERLAY_BASE + 0x3FFFF:
+        case NOC_OVERLAY_BASE ... NOC_OVERLAY_LIMIT:
             return noc_overlay_rd32<'E'>(tile_id, addr - NOC_OVERLAY_BASE);
         case ETH_RXQ_BASE ... ETH_RXQ_LIMIT:
             return eth_rxq_regs_rd32(tile_id, addr - ETH_RXQ_BASE);
@@ -2366,7 +2380,7 @@ static bool e_tile_mmio_wr32(uint32_t tile_id, uint64_t addr, uint32_t data) {
         case NOC1_REGS_BASE ... NOC1_REGS_LIMIT:
             noc_regs_wr32<'E'>(tile_id, 1, addr - NOC1_REGS_BASE, data);
             return true;
-        case NOC_OVERLAY_BASE ... NOC_OVERLAY_BASE + 0x3FFFF:
+        case NOC_OVERLAY_BASE ... NOC_OVERLAY_LIMIT:
             noc_overlay_wr32<'E'>(tile_id, addr - NOC_OVERLAY_BASE, data);
             return true;
         case ETH_TXQ_BASE ... ETH_TXQ_LIMIT:
@@ -2503,7 +2517,7 @@ static uint32_t arc_reset_unit_rd32(uint32_t offset) {
     }
 }
 
-static constexpr uint32_t arc_harvesting_mask(uint32_t chip_id) {
+static uint32_t arc_harvesting_mask(uint32_t chip_id) {
 #if TT_ARCH_VERSION == 0
     constexpr uint8_t LOGICAL_TO_ARC_BIT[] = {1, 3, 5, 7, 9, 8, 6, 4, 2, 0};
     uint32_t logical_mask = logical_harvesting_mask(chip_id);

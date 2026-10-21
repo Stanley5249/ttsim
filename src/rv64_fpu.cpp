@@ -10,10 +10,6 @@
 #define FFLAG_DZ (1u << 3) // divide by zero
 #define FFLAG_NV (1u << 4) // invalid
 
-static void set_flags(Rv64SysHartState *h, uint32_t f) {
-    h->fcsr |= f;
-}
-
 static inline void fp_mark_dirty(Rv64SysHartState *h) {
     h->mstatus |= MSTATUS_FS | MSTATUS_SD;
 }
@@ -436,7 +432,6 @@ using SF32 = SoftFloat<uint32_t, uint64_t, 32, 23>;
 using SF64 = SoftFloat<uint64_t, unsigned __int128, 64, 52>;
 
 static const uint32_t F32_CANON_NAN = 0x7FC00000u;
-static const uint64_t F64_CANON_NAN = 0x7FF8000000000000ull;
 
 static uint64_t box32(uint32_t v) {
     return 0xFFFFFFFF00000000ull | v;
@@ -444,22 +439,6 @@ static uint64_t box32(uint32_t v) {
 
 static uint32_t unbox32(uint64_t r) {
     return ((r >> 32) == 0xFFFFFFFFu) ? uint32_t(r) : F32_CANON_NAN;
-}
-
-static bool f32_is_nan(uint32_t a) {
-    return ((a & 0x7F800000u) == 0x7F800000u) && (a & 0x007FFFFFu);
-}
-
-static bool f32_is_snan(uint32_t a) {
-    return f32_is_nan(a) && !(a & 0x00400000u);
-}
-
-static bool f64_is_nan(uint64_t a) {
-    return ((a & 0x7FF0000000000000ull) == 0x7FF0000000000000ull) && (a & 0x000FFFFFFFFFFFFFull);
-}
-
-static bool f64_is_snan(uint64_t a) {
-    return f64_is_nan(a) && !(a & 0x0008000000000000ull);
 }
 
 static inline bool fp_off(Rv64SysHartState *h) {
@@ -735,6 +714,36 @@ static uint64_t hostfp_from_int_d(uint64_t xr, uint32_t r2, uint32_t rm, uint32_
     return std::bit_cast<uint64_t>(r);
 }
 
+template<class F> using FloatBits = std::conditional_t<sizeof(F) == 4, uint32_t, uint64_t>;
+template<class F> using FloatFormat = std::conditional_t<sizeof(F) == 4, SF32, SF64>;
+
+// FMIN/FMAX: a NaN operand gives the other (two NaNs give the canonical NaN), and -0 is below +0
+template<class F> static FloatBits<F> fmin_max(FloatBits<F> a, FloatBits<F> b, bool is_max, uint32_t *fl) {
+    using SF = FloatFormat<F>;
+    *fl |= (SF::is_snan(a) || SF::is_snan(b)) ? FFLAG_NV : 0;
+    if (SF::is_nan(a)) {
+        return SF::is_nan(b) ? SF::QNAN : b;
+    }
+    if (SF::is_nan(b)) {
+        return a;
+    }
+    F fa = std::bit_cast<F>(a), fb = std::bit_cast<F>(b);
+    if (fa == fb) {
+        return is_max ? (a & b) : (a | b); // only +0 and -0 differ here: OR the signs for min, AND them for max
+    }
+    return ((fa < fb) != is_max) ? a : b;
+}
+
+// FLE (funct3 0), FLT (1), FEQ (2): false with a NaN operand, which is invalid for FLE and FLT, and for FEQ if
+// signaling
+template<class F> static uint32_t fcmp(FloatBits<F> a, FloatBits<F> b, uint32_t funct3, uint32_t *fl) {
+    using SF = FloatFormat<F>;
+    bool invalid = (funct3 == 2) ? (SF::is_snan(a) || SF::is_snan(b)) : (SF::is_nan(a) || SF::is_nan(b));
+    *fl |= invalid ? FFLAG_NV : 0;
+    F fa = std::bit_cast<F>(a), fb = std::bit_cast<F>(b);
+    return (funct3 == 0) ? (fa <= fb) : (funct3 == 1) ? (fa < fb) : (fa == fb);
+}
+
 void rv64_fpu_op(Rv64SysHartState *h, uint32_t inst) {
     if (fp_off(h)) {
         return rv64_sys_raise(h, EXC_ILLEGAL_INST, inst);
@@ -766,6 +775,7 @@ void rv64_fpu_op(Rv64SysHartState *h, uint32_t inst) {
         fp_mark_dirty(h);
     }
 
+    uint32_t fl = 0;
     switch (funct7) {
         case 0x10: case 0x11: { // FSGNJ[N/X].S / .D
             if (is_double) {
@@ -775,107 +785,18 @@ void rv64_fpu_op(Rv64SysHartState *h, uint32_t inst) {
             }
             return;
         }
-        case 0x14: case 0x15: { // FMIN/FMAX .S/.D (funct3 0=min, 1=max)
-            bool want_max = (funct3 == 1);
+        case 0x14: case 0x15: // FMIN/FMAX .S/.D (funct3 0=min, 1=max)
             if (is_double) {
-                uint64_t a = h->f_regs[r1], b = h->f_regs[r2];
-                if (f64_is_snan(a) || f64_is_snan(b)) {
-                    set_flags(h, FFLAG_NV);
-                }
-                bool an = f64_is_nan(a), bn = f64_is_nan(b);
-                uint64_t res;
-                if (an && bn) {
-                    res = F64_CANON_NAN;
-                } else if (an) {
-                    res = b;
-                } else if (bn) {
-                    res = a;
-                } else {
-                    // signed compare with -0 < +0
-                    auto lt = [](uint64_t x, uint64_t y) {
-                        bool xs = x >> 63, ys = y >> 63;
-                        if (xs != ys) {
-                            return xs;
-                        }
-                        return xs ? (x > y) : (x < y);
-                    };
-                    bool a_lt_b = (a != b) && lt(a, b);
-                    res = (want_max ? !a_lt_b : a_lt_b) ? a : b;
-                }
-                h->f_regs[r_dst] = res;
+                h->f_regs[r_dst] = fmin_max<double>(h->f_regs[r1], h->f_regs[r2], funct3 == 1, &fl);
             } else {
-                uint32_t a = unbox32(h->f_regs[r1]), b = unbox32(h->f_regs[r2]);
-                if (f32_is_snan(a) || f32_is_snan(b)) {
-                    set_flags(h, FFLAG_NV);
-                }
-                bool an = f32_is_nan(a), bn = f32_is_nan(b);
-                uint32_t res;
-                if (an && bn) {
-                    res = F32_CANON_NAN;
-                } else if (an) {
-                    res = b;
-                } else if (bn) {
-                    res = a;
-                } else {
-                    auto lt = [](uint32_t x, uint32_t y) {
-                        bool xs = x >> 31, ys = y >> 31;
-                        if (xs != ys) {
-                            return xs;
-                        }
-                        return xs ? (x > y) : (x < y);
-                    };
-                    bool a_lt_b = (a != b) && lt(a, b);
-                    res = (want_max ? !a_lt_b : a_lt_b) ? a : b;
-                }
-                h->f_regs[r_dst] = box32(res);
+                h->f_regs[r_dst] = box32(fmin_max<float>(unbox32(h->f_regs[r1]), unbox32(h->f_regs[r2]), funct3 == 1, &fl));
             }
+            h->fcsr |= fl;
             return;
-        }
         case 0x50: case 0x51: { // FCMP .S/.D : funct3 0=FLE, 1=FLT, 2=FEQ
-            uint32_t result;
-            if (is_double) {
-                uint64_t a = h->f_regs[r1], b = h->f_regs[r2];
-                bool an = f64_is_nan(a), bn = f64_is_nan(b);
-                bool sig_invalid = (funct3 == 2) ? (f64_is_snan(a) || f64_is_snan(b)) : (an || bn);
-                if (sig_invalid) {
-                    set_flags(h, FFLAG_NV);
-                }
-                if (an || bn) {
-                    result = 0;
-                } else {
-                    auto lt = [](uint64_t x, uint64_t y) {
-                        bool xs = x >> 63, ys = y >> 63;
-                        if (xs != ys) {
-                            return xs;
-                        }
-                        return xs ? (x > y) : (x < y);
-                    };
-                    bool eq = (a == b) || (((a << 1) == 0) && ((b << 1) == 0)); // +0 == -0
-                    bool less = !eq && lt(a, b);
-                    result = (funct3 == 0) ? (less || eq) : (funct3 == 1) ? less : eq;
-                }
-            } else {
-                uint32_t a = unbox32(h->f_regs[r1]), b = unbox32(h->f_regs[r2]);
-                bool an = f32_is_nan(a), bn = f32_is_nan(b);
-                bool sig_invalid = (funct3 == 2) ? (f32_is_snan(a) || f32_is_snan(b)) : (an || bn);
-                if (sig_invalid) {
-                    set_flags(h, FFLAG_NV);
-                }
-                if (an || bn) {
-                    result = 0;
-                } else {
-                    auto lt = [](uint32_t x, uint32_t y) {
-                        bool xs = x >> 31, ys = y >> 31;
-                        if (xs != ys) {
-                            return xs;
-                        }
-                        return xs ? (x > y) : (x < y);
-                    };
-                    bool eq = (a == b) || (((a << 1) == 0) && ((b << 1) == 0));
-                    bool less = !eq && lt(a, b);
-                    result = (funct3 == 0) ? (less || eq) : (funct3 == 1) ? less : eq;
-                }
-            }
+            uint32_t result = is_double ? fcmp<double>(h->f_regs[r1], h->f_regs[r2], funct3, &fl)
+                                        : fcmp<float>(unbox32(h->f_regs[r1]), unbox32(h->f_regs[r2]), funct3, &fl);
+            h->fcsr |= fl;
             if (r_dst) {
                 h->x_regs[r_dst] = result;
             }
@@ -941,7 +862,6 @@ void rv64_fpu_op(Rv64SysHartState *h, uint32_t inst) {
     // Arithmetic and conversions: funct3 is the rounding mode (7 = dynamic -> fcsr.frm). Its legality
     // was already validated above (before fp_mark_dirty), so rm is guaranteed in 0..4 here.
     uint32_t rm = (funct3 == 7) ? ((h->fcsr >> 5) & 7) : funct3;
-    uint32_t fl = 0;
     uint32_t s32a = unbox32(h->f_regs[r1]), s32b = unbox32(h->f_regs[r2]);
     uint64_t d64a = h->f_regs[r1], d64b = h->f_regs[r2];
     switch (funct7) {

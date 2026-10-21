@@ -9,7 +9,7 @@
 const char *ttsim_error_category_name(TTSimErrorCategory category) {
     switch (category) {
         case TTSimErrorCategory::UndefinedBehavior: return "UndefinedBehavior";
-        case TTSimErrorCategory::UnpredictableValueUsed: return "UnpredictableValueUsed";
+        case TTSimErrorCategory::UnpredictableValue: return "UnpredictableValue";
         case TTSimErrorCategory::NonContractualBehavior: return "NonContractualBehavior";
         case TTSimErrorCategory::AssertionFailure: return "AssertionFailure";
         case TTSimErrorCategory::UntestedFunctionality: return "UntestedFunctionality";

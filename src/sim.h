@@ -233,6 +233,13 @@ struct TensixState {
     uint8_t mutex[TT_ARCH_VERSION ? 5 : 8]; // odd, but per docs, BH has fewer mutexes than WH
     uint8_t sem[8];
     uint8_t sem_max[8];
+    // The block mask and semaphores of each thread's last STALLWAIT or SEMWAIT, until an instruction that block mask
+    // holds reaches the Wait Gate; block mask 0 = none
+    uint32_t wait_block[TENSIX_INST_PIPES];
+    uint32_t wait_sems[TENSIX_INST_PIPES];
+#if TT_ARCH_VERSION == 0
+    uint32_t wait_sem_cond[TENSIX_INST_PIPES];
+#endif
 
     uint32_t dma_regs[TENSIX_INST_PIPES][64];
     uint32_t src_a[2][SRC_ROWS][ROW_SIZE]; // only 19 real bits per cell; make sure low 13 bits are always zero
@@ -276,6 +283,7 @@ struct TensixState {
     uint32_t packer_tpg_z[4];
     uint32_t packer_dst_addr[4];
     uint32_t packer_dst_exp_addr[4];
+    uint32_t packer_dst_data_start[4];
     bool mailbox_has_data[4][4]; // [writer][reader]
     uint32_t mailbox_data[4][4]; // [writer][reader]
     TensixConfigState config[2];
@@ -314,6 +322,7 @@ struct BaseTile {
 struct TensixTile {
     BaseTile base;
     uint32_t rv32_cores_active;
+    uint32_t rv32_cores_parked; // out of reset, but stalled on a read only a reset can end, so not stepped
 #if RV64_CORES_PER_T_TILE
     uint32_t rv64_cores_active;
 #endif
@@ -538,13 +547,6 @@ struct DramChannel {
     uint8_t *p_mem;
 };
 
-#if !defined(NUM_CHIPS)
-#define NUM_CHIPS 1
-#endif
-#if !defined(NUM_MMIO_CHIPS)
-#define NUM_MMIO_CHIPS 1
-#endif
-
 struct ChipState {
     TensixTile t_tiles[NUM_T_TILES];
     EthTile e_tiles[NUM_E_TILES];
@@ -552,30 +554,30 @@ struct ChipState {
     PcieTile p_tile;
     DramChannel dram[NUM_DRAM_CHANNELS];
     uint64_t rv32_cores_active;
+    uint64_t t_tiles_busy[(NUM_T_TILES + 63) / 64]; // T tiles that may have a core or Tensix pipe active
 };
 
+// The chip count is known only to sim.cpp, so every other file builds once for all configurations.
+extern const uint32_t g_num_chips;
+extern const uint32_t g_num_mmio_chips; // chips 0 to g_num_mmio_chips - 1 have a host PCIe link
+extern ChipState g_chips[]; // not hidden: small-model code then reaches it through the GOT, wherever -mcmodel=medium puts it
 extern uint32_t g_current_chip_id;
+extern ChipState *g_chip; // &g_chips[g_current_chip_id]
 extern uint64_t g_clock;
-extern ChipState g_chips[NUM_CHIPS];
 
 // XXX transitional
-// Single-chip builds index a constant 0 so the hot paths cannot regress; only
-// multichip builds pay for the g_current_chip_id indirection.
-#if NUM_CHIPS > 1
-#define g_t_tiles g_chips[g_current_chip_id].t_tiles
-#define g_e_tiles g_chips[g_current_chip_id].e_tiles
-#define g_a_tile g_chips[g_current_chip_id].a_tile
-#define g_p_tile g_chips[g_current_chip_id].p_tile
-#define g_dram g_chips[g_current_chip_id].dram
-#define g_rv32_cores_active g_chips[g_current_chip_id].rv32_cores_active
-#else
-#define g_t_tiles g_chips[0].t_tiles
-#define g_e_tiles g_chips[0].e_tiles
-#define g_a_tile g_chips[0].a_tile
-#define g_p_tile g_chips[0].p_tile
-#define g_dram g_chips[0].dram
-#define g_rv32_cores_active g_chips[0].rv32_cores_active
-#endif
+#define g_t_tiles g_chip->t_tiles
+#define g_e_tiles g_chip->e_tiles
+#define g_a_tile g_chip->a_tile
+#define g_p_tile g_chip->p_tile
+#define g_dram g_chip->dram
+#define g_rv32_cores_active g_chip->rv32_cores_active
+#define g_t_tiles_busy g_chip->t_tiles_busy
+
+// Called whenever a T tile's core or Tensix pipe becomes active, so the clock loop visits it
+static inline void ttsim_t_tile_set_busy(uint32_t tile_id) {
+    g_t_tiles_busy[tile_id / 64] |= 1ull << (tile_id % 64);
+}
 
 void libttsim_pci_dma_mem_rd_bytes(uint64_t paddr, void *p, uint32_t size);
 void libttsim_pci_dma_mem_wr_bytes(uint64_t paddr, const void *p, uint32_t size);

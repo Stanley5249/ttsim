@@ -6,16 +6,19 @@
 #include <sys/mman.h>
 #include "sim.h"
 
-uint32_t g_current_chip_id;
-uint64_t g_clock;
+const uint32_t g_num_chips = NUM_CHIPS;
+const uint32_t g_num_mmio_chips = NUM_MMIO_CHIPS;
 ChipState g_chips[NUM_CHIPS];
+uint32_t g_current_chip_id;
+ChipState *g_chip = g_chips;
+uint64_t g_clock;
 
 uint64_t ttsim_get_clock() {
     return g_clock;
 }
 
 void ttsim_init() {
-    for (uint32_t chip_id = 0; chip_id < NUM_CHIPS; chip_id++) {
+    for (uint32_t chip_id = 0; chip_id < g_num_chips; chip_id++) {
         ttsim_select_chip(chip_id);
         p_tile_init();
         for (uint32_t tile_id = 0; tile_id < std::size(g_t_tiles); tile_id++) {
@@ -27,7 +30,8 @@ void ttsim_init() {
         a_tile_init();
         for (uint32_t i = 0; i < std::size(g_dram); i++) {
             // Note that MAP_PRIVATE is required if we ever fork(), or else child processes will share DRAM with parent
-            g_dram[i].p_mem = (uint8_t *)mmap(nullptr, DRAM_CHANNEL_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            // MAP_NORESERVE keeps the mostly untouched DRAM out of commit accounting, which fork() would otherwise refuse
+            g_dram[i].p_mem = (uint8_t *)mmap(nullptr, DRAM_CHANNEL_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
             TTSIM_VERIFY(g_dram[i].p_mem != MAP_FAILED, SystemError, "DRAM mmap() failed");
 #if defined(MADV_HUGEPAGE)
             madvise(g_dram[i].p_mem, DRAM_CHANNEL_SIZE, MADV_HUGEPAGE);
@@ -39,18 +43,26 @@ void ttsim_init() {
 }
 
 void ttsim_select_chip(uint32_t chip_id) {
-    TTSIM_VERIFY(chip_id < NUM_CHIPS, ConfigurationError, "chip_id=%d", chip_id);
+    TTSIM_VERIFY(chip_id < g_num_chips, ConfigurationError, "chip_id=%d", chip_id);
     g_current_chip_id = chip_id;
+    g_chip = &g_chips[chip_id];
 }
 
 void ttsim_exit() {
     ttsim_heartbeat();
-    // XXX Would be good to munmap() DRAM here
+    for (uint32_t chip_id = 0; chip_id < g_num_chips; chip_id++) {
+        ttsim_select_chip(chip_id);
+        for (uint32_t i = 0; i < std::size(g_dram); i++) {
+            munmap(g_dram[i].p_mem, DRAM_CHANNEL_SIZE);
+            g_dram[i].p_mem = nullptr;
+        }
+    }
+    ttsim_select_chip(0);
 }
 
 bool ttsim_rv32_get_core_active(char tile_type, uint32_t tile_id, uint32_t rv32_id) {
     if (tile_type == 'T') {
-        return (g_t_tiles[tile_id].rv32_cores_active >> rv32_id) & 1;
+        return ((g_t_tiles[tile_id].rv32_cores_active | g_t_tiles[tile_id].rv32_cores_parked) >> rv32_id) & 1;
     } else {
         TTSIM_VERIFY(tile_type == 'E', AssertionFailure, "tile_type=%c", tile_type);
         uint32_t core_index = tile_id * RV32_CORES_PER_E_TILE + rv32_id;
@@ -62,8 +74,10 @@ void ttsim_rv32_set_core_active(char tile_type, uint32_t tile_id, uint32_t rv32_
     if (tile_type == 'T') {
         if (active) {
             g_t_tiles[tile_id].rv32_cores_active |= 1 << rv32_id;
+            ttsim_t_tile_set_busy(tile_id);
         } else {
             g_t_tiles[tile_id].rv32_cores_active &= ~(1 << rv32_id);
+            g_t_tiles[tile_id].rv32_cores_parked &= ~(1 << rv32_id);
         }
     } else {
         TTSIM_VERIFY(tile_type == 'E', AssertionFailure, "tile_type=%c", tile_type);

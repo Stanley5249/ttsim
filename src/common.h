@@ -14,7 +14,7 @@
 
 enum class TTSimErrorCategory {
     UndefinedBehavior, // as defined in tt-isa-documentation
-    UnpredictableValueUsed, // as defined in tt-isa-documentation
+    UnpredictableValue, // as defined in tt-isa-documentation
     NonContractualBehavior, // as defined in tt-isa-documentation
     AssertionFailure, // internal bug in simulator
     UntestedFunctionality, // implemented, but inadequate test coverage to enable yet

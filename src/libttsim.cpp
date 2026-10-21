@@ -95,7 +95,7 @@ extern "C" API_EXPORT void libttsim_set_pci_dma_mem_callbacks(
     s_pfn_libttsim_pci_dma_mem_wr_bytes = pci_dma_mem_wr;
 }
 
-// Map a bus/device/function tuple to an MMIO chip index, or NUM_MMIO_CHIPS if the slot is empty.
+// Map a bus/device/function tuple to an MMIO chip index, or g_num_mmio_chips if the slot is empty.
 // An absent-but-well-formed BDF is not an error: hosts discover endpoints by probing empty slots.
 static uint32_t pci_device_from_bdf(uint32_t bus_device_function) {
     // normally only 16 bits, but validate none above these are set
@@ -104,35 +104,34 @@ static uint32_t pci_device_from_bdf(uint32_t bus_device_function) {
     uint32_t bdf_device = (bus_device_function >> 3) & 0x1F;
     uint32_t bus = (bus_device_function >> 8) & 0xFF;
     if (function) {
-        return NUM_MMIO_CHIPS; // single-function endpoints; functions 1-7 are absent
+        return g_num_mmio_chips; // single-function endpoints; functions 1-7 are absent
     }
-#if NUM_CHIPS == 32
-    // Galaxy: chip N sits at the bus its cluster descriptor gives it. As on silicon,
-    // each ASIC is its own PCI bus at device 0; the bus's high nibble is the tray and
-    // its low nibble the 1-based ASIC slot.
-    static constexpr uint8_t CHIP_BUS[NUM_MMIO_CHIPS] = {
+    if (g_num_chips == 32) {
+        // Galaxy: chip N sits at the bus its cluster descriptor gives it. As on silicon,
+        // each ASIC is its own PCI bus at device 0; the bus's high nibble is the tray and
+        // its low nibble the 1-based ASIC slot. Every Galaxy chip is an MMIO chip.
+        static constexpr uint8_t CHIP_BUS[32] = {
 #if TT_ARCH_VERSION == 0
-        0xC1, 0x41, 0x01, 0x81, 0xC2, 0x42, 0x02, 0x82,
-        0xC3, 0x43, 0x03, 0x83, 0xC4, 0x44, 0x04, 0x84,
-        0xC5, 0x45, 0x05, 0x85, 0xC6, 0x46, 0x06, 0x86,
-        0xC7, 0x47, 0x07, 0x87, 0xC8, 0x48, 0x08, 0x88,
-#elif TT_ARCH_VERSION == 1
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-        0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
-        0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88,
-        0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8,
+            0xC1, 0x41, 0x01, 0x81, 0xC2, 0x42, 0x02, 0x82,
+            0xC3, 0x43, 0x03, 0x83, 0xC4, 0x44, 0x04, 0x84,
+            0xC5, 0x45, 0x05, 0x85, 0xC6, 0x46, 0x06, 0x86,
+            0xC7, 0x47, 0x07, 0x87, 0xC8, 0x48, 0x08, 0x88,
 #else
-#error unsupported
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+            0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88,
+            0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8,
 #endif
-    };
-    for (uint32_t device = 0; device < NUM_MMIO_CHIPS; device++) {
-        if ((bus == CHIP_BUS[device]) && (bdf_device == 0)) {
-            return device;
+        };
+        TTSIM_ASSERT(g_num_mmio_chips == 32);
+        for (uint32_t device = 0; device < 32; device++) {
+            if ((bus == CHIP_BUS[device]) && (bdf_device == 0)) {
+                return device;
+            }
         }
+        return g_num_mmio_chips;
     }
-    return NUM_MMIO_CHIPS;
-#endif
-    return (bus == 0 && (bdf_device < NUM_MMIO_CHIPS)) ? bdf_device : NUM_MMIO_CHIPS;
+    return (bus == 0 && (bdf_device < g_num_mmio_chips)) ? bdf_device : g_num_mmio_chips;
 }
 
 extern "C" API_EXPORT uint32_t libttsim_pci_config_rd32(uint32_t bus_device_function, uint32_t offset) {
@@ -140,7 +139,7 @@ extern "C" API_EXPORT uint32_t libttsim_pci_config_rd32(uint32_t bus_device_func
     TTSIM_VERIFY(s_ttsim_running, ConfigurationError, "sim is not running");
     TTSIM_VERIFY(!(offset & 3), UndefinedBehavior, "misaligned offset=0x%x", offset);
     uint32_t device = pci_device_from_bdf(bus_device_function);
-    if (device >= NUM_MMIO_CHIPS) {
+    if (device >= g_num_mmio_chips) {
         return 0xFFFFFFFFu; // non-existent device
     }
     return pcie_config_rd32(device, offset);
@@ -151,41 +150,33 @@ extern "C" API_EXPORT void libttsim_pci_config_wr32(uint32_t bus_device_function
     TTSIM_VERIFY(s_ttsim_running, ConfigurationError, "sim is not running");
     TTSIM_VERIFY(!(offset & 3), UndefinedBehavior, "misaligned offset=0x%x", offset);
     uint32_t device = pci_device_from_bdf(bus_device_function);
-    TTSIM_VERIFY(device < NUM_MMIO_CHIPS, UndefinedBehavior, "bus_device_function=0x%x has no device",
+    TTSIM_VERIFY(device < g_num_mmio_chips, UndefinedBehavior, "bus_device_function=0x%x has no device",
         bus_device_function);
     pcie_config_wr32(device, offset, data);
 }
 
 // Route a host physical access to the owning MMIO device's chip, then translate within
-// that device's BAR windows. For NUM_CHIPS==1 this is a straight passthrough.
+// that device's BAR windows.
 extern "C" API_EXPORT void libttsim_pci_mem_rd_bytes(uint64_t paddr, void *p, uint32_t size) {
     FpEnvGuard fpenv_guard;
     TTSIM_VERIFY(s_ttsim_running, ConfigurationError, "sim is not running");
     TTSIM_VERIFY(size, UndefinedBehavior, "size=%d", size);
-#if NUM_CHIPS > 1
     uint32_t device = pcie_device_from_paddr(paddr, size);
     uint32_t saved_chip_id = g_current_chip_id;
     ttsim_select_chip(device);
     pcie_mem_rd_bytes(paddr, p, size);
     ttsim_select_chip(saved_chip_id);
-#else
-    pcie_mem_rd_bytes(paddr, p, size);
-#endif
 }
 
 extern "C" API_EXPORT void libttsim_pci_mem_wr_bytes(uint64_t paddr, const void *p, uint32_t size) {
     FpEnvGuard fpenv_guard;
     TTSIM_VERIFY(s_ttsim_running, ConfigurationError, "sim is not running");
     TTSIM_VERIFY(size, UndefinedBehavior, "size=%d", size);
-#if NUM_CHIPS > 1
     uint32_t device = pcie_device_from_paddr(paddr, size);
     uint32_t saved_chip_id = g_current_chip_id;
     ttsim_select_chip(device);
     pcie_mem_wr_bytes(paddr, p, size);
     ttsim_select_chip(saved_chip_id);
-#else
-    pcie_mem_wr_bytes(paddr, p, size);
-#endif
 }
 
 void libttsim_pci_dma_mem_rd_bytes(uint64_t paddr, void *p, uint32_t size) {
@@ -216,8 +207,29 @@ extern "C" API_EXPORT void libttsim_tile_wr_bytes(uint32_t x, uint32_t y, uint64
     TTSIM_ERROR_NOFMT(UnsupportedFunctionality);
 }
 
+// The first busy T tile at or after tile_id, or NUM_T_TILES if none
+static inline uint32_t next_busy_t_tile(uint32_t tile_id) {
+    uint64_t mask = ~0ull << (tile_id % 64);
+    for (uint32_t word = tile_id / 64; word < std::size(g_t_tiles_busy); word++, mask = ~0ull) {
+        if (uint64_t busy = g_t_tiles_busy[word] & mask) {
+            return 64 * word + __builtin_ctzll(busy);
+        }
+    }
+    return NUM_T_TILES;
+}
+
+static bool t_tile_active(const TensixTile *p_tile) {
+    uint32_t active = p_tile->rv32_cores_active;
+    for (uint32_t tensix_id = 0; tensix_id < std::size(p_tile->tensix); tensix_id++) {
+        active |= p_tile->tensix[tensix_id].inst_pipes_active;
+    }
+    return active;
+}
+
 static void clock_current_chip() {
-    for (uint32_t tile_id = 0; tile_id < std::size(g_t_tiles); tile_id++) {
+    // Idle tiles are skipped. The mask is reread after each tile, so a tile woken by a lower-numbered one is still
+    // clocked this cycle.
+    for (uint32_t tile_id = next_busy_t_tile(0); tile_id < NUM_T_TILES; tile_id = next_busy_t_tile(tile_id + 1)) {
         TensixTile *p_tile = &g_t_tiles[tile_id];
         // Hack: for simulator perf, we clock a tile repeatedly as long as it successfully executes at least one Tensix instruction
         for (;;) {
@@ -248,6 +260,9 @@ static void clock_current_chip() {
                 break; // no Tensix instructions executed, bail out
             }
         }
+        if (!t_tile_active(p_tile)) {
+            g_t_tiles_busy[tile_id / 64] &= ~(1ull << (tile_id % 64));
+        }
     }
     for (uint64_t rv32_mask = g_rv32_cores_active; rv32_mask; rv32_mask &= rv32_mask - 1) {
         uint32_t core_index = __builtin_ctzll(rv32_mask);
@@ -261,21 +276,13 @@ static void clock_current_chip() {
 extern "C" API_EXPORT void libttsim_clock(uint32_t n_clocks) {
     FpEnvGuard fpenv_guard;
     TTSIM_VERIFY(s_ttsim_running, ConfigurationError, "sim is not running");
-#if NUM_CHIPS > 1
     uint32_t saved_chip_id = g_current_chip_id;
-#endif
     for (uint32_t i = 0; i < n_clocks; i++) {
-#if NUM_CHIPS > 1
-        for (uint32_t chip_id = 0; chip_id < NUM_CHIPS; chip_id++) {
+        for (uint32_t chip_id = 0; chip_id < g_num_chips; chip_id++) {
             ttsim_select_chip(chip_id);
             clock_current_chip();
         }
-#else
-        clock_current_chip();
-#endif
         g_clock++; // single global timebase, advanced once per clock across all chips
     }
-#if NUM_CHIPS > 1
     ttsim_select_chip(saved_chip_id);
-#endif
 }

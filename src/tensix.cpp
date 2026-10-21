@@ -55,6 +55,7 @@ static void tensix_push_inst_fifo(TensixState *p_tensix, uint32_t pipe, uint32_t
     inst_wr_ptr = (inst_wr_ptr + 1) % TENSIX_INST_FIFO_SIZE;
     p_tensix->inst_wr_ptr[pipe] = inst_wr_ptr;
     p_tensix->inst_pipes_active |= 1 << pipe;
+    ttsim_t_tile_set_busy(p_tensix->tile_id);
 
     TTSIM_VERIFY(inst_wr_ptr != p_tensix->inst_rd_ptr[pipe], UnimplementedFunctionality, "pipe %d inst fifo full", pipe); // require 1 entry always empty
 }
@@ -331,6 +332,8 @@ uint32_t tensix_cfg_rd32(TensixState *p_tensix, uint32_t bank, uint32_t offset) 
         case 123: return 0;
         CFG_REG_BANKED_RD(124)
         CFG_REG_BANKED_RD(125)
+        CFG_REG_BANKED_RD(140)
+        CFG_REG_BANKED_RD(141)
         CFG_REG_RD(220)
 #endif
 #undef CFG_REG_BANKED_RD
@@ -465,7 +468,8 @@ void tensix_cfg_wr32(TensixState *p_tensix, uint32_t bank, uint32_t offset, uint
         CFG_REG_BANKED_WR(121)
         CFG_REG_BANKED_WR(124)
         CFG_REG_BANKED_WR(125)
-        case 140 ... 141: TTSIM_ERROR(UnimplementedFunctionality, "reg=%d", reg); // XXX unpacker1 asymmetry currently
+        CFG_REG_BANKED_WR(140)
+        CFG_REG_BANKED_WR(141)
         CFG_REG_WR(180)
         CFG_REG_WR(181)
         CFG_REG_WR(182)
@@ -1606,17 +1610,18 @@ static bool tensix_matmul_op(TensixState *p_tensix, uint32_t pipe, uint32_t dst,
     bool unflagged_row_valid = p_tensix->dst_row_valid[unflagged_row];
     uint32_t fidelity_phase = (p_tensix->fidelity[pipe] + math_fidelity_base(p_tensix, pipe)) & 3;
     bool fp_exponent_8b = (src_a_fmt != 1) && (src_a_fmt != 10) && !is_int8;
+    uint32_t high_exp_bits = 0x70000000;
     if (!fp_exponent_8b) {
         for (uint32_t col = 0; col < ROW_SIZE; col++) {
             for (uint32_t i = 0; i < 16; i++) {
                 uint32_t value = p_tensix->src_a[src_a_bank][src_a_row + i][col];
-                TTSIM_VERIFY(!(value & 0x70000000), UnsupportedFunctionality, "SrcA 5b-exp datum=0x%x has nonzero high-3 exp bits", value);
+                TTSIM_VERIFY(!(value & high_exp_bits), UnsupportedFunctionality, "SrcA 5b-exp datum=0x%x has nonzero high-3 exp bits", value);
             }
         }
         for (uint32_t row = 0; row < B_ROWS; row++) {
             for (uint32_t i = 0; i < 16; i++) {
                 uint32_t value = p_tensix->src_b[src_b_bank][src_b_row + row][i];
-                TTSIM_VERIFY(!(value & 0x70000000), UnsupportedFunctionality, "SrcB 5b-exp datum=0x%x has nonzero high-3 exp bits", value);
+                TTSIM_VERIFY(!(value & high_exp_bits), UnsupportedFunctionality, "SrcB 5b-exp datum=0x%x has nonzero high-3 exp bits", value);
             }
         }
     }
@@ -2263,7 +2268,7 @@ TENSIX_EXECUTE_PACR() {
         "intermediate_format=%d mismatches late_from_format=%d", intermediate_format, pack_src_format);
     uint32_t pack_fmt_conv_mode = (p_config->PCK_DEST_RD_CTRL_Read_32b_data << 8) | (pack_src_format << 4) | pack_dst_format;
     TTSIM_VERIFY((pack_fmt_conv_mode == 0x10) || (pack_fmt_conv_mode == 0x11) || (pack_fmt_conv_mode == 0x15) || // fp16 src, fp32/fp16/bf16 dst
-                 ((pack_fmt_conv_mode == 0x00) && (TT_ARCH_VERSION == 1)) || // bh only bf16 read widened to fp32
+                 ((pack_fmt_conv_mode == 0x00) && (TT_ARCH_VERSION == 1)) || // bh only, refused below
                  ((pack_fmt_conv_mode == 0x1A) && (TT_ARCH_VERSION == 1)) || // bh only fp16 src, fp8 dst
                  (pack_fmt_conv_mode == 0x26) || // bfp8a src, bfp8 dst
                  (pack_fmt_conv_mode == 0x50) || (pack_fmt_conv_mode == 0x55) || // bf16 src, fp32/bf16 dst
@@ -2289,6 +2294,8 @@ TENSIX_EXECUTE_PACR() {
     if (pack_fmt_conv_mode == 0x00) {
         TTSIM_VERIFY(!p_config->STACC_RELU_ApplyRelu && !p_config->PCK_DEST_RD_CTRL_Read_int8, UnimplementedFunctionality,
             "pack_fmt_conv_mode=0x0 apply_relu=%d read_raw=%d", p_config->STACC_RELU_ApplyRelu, p_config->PCK_DEST_RD_CTRL_Read_int8);
+        // Each datum's low 16 bits come from another Dest row
+        TTSIM_ERROR(UnsupportedFunctionality, "pack_fmt_conv_mode=0x0");
     }
 #endif
     uint32_t src_element_size_bits = get_element_size(pack_src_format);
@@ -2389,11 +2396,14 @@ TENSIX_EXECUTE_PACR() {
 #endif
         if (!p_tensix->packer_valid) {
             uint32_t addr = packer_addrs[packer];
+#if TT_ARCH_VERSION == 0
             TTSIM_VERIFY(!p_addr_ctrl->ch1_z, UnimplementedFunctionality, "ch1_z=%d", p_addr_ctrl->ch1_z);
+#endif
             TTSIM_VERIFY(!p_addr_ctrl->ch1_w, UnimplementedFunctionality, "ch1_w=%d", p_addr_ctrl->ch1_w);
 #if TT_ARCH_VERSION == 1
             TTSIM_VERIFY(!p_config->PCK0_ADDR_BASE_REG_1_Base, UnimplementedFunctionality, "PCK0_ADDR_BASE_REG_1_Base=0x%x", p_config->PCK0_ADDR_BASE_REG_1_Base);
-            uint32_t yzw_addr = p_addr_ctrl->ch1_y * p_config->PCK0_ADDR_CTRL_XY_REG_1_Ystride;
+            uint32_t yzw_addr = p_addr_ctrl->ch1_y * p_config->PCK0_ADDR_CTRL_XY_REG_1_Ystride +
+                                p_addr_ctrl->ch1_z * p_config->PCK0_ADDR_CTRL_ZW_REG_1_Zstride;
             addr += yzw_addr >> 4;
 #else
             // Note: PCK0_ADDR_BASE_REG_1_Base (cfg13) is not instantiated and errors on write; always 0
@@ -2414,9 +2424,14 @@ TENSIX_EXECUTE_PACR() {
                 addr += exp_section_size;
             }
             p_tensix->packer_dst_addr[packer] = addr << 4;
+            p_tensix->packer_dst_data_start[packer] = addr << 4;
         }
         if (dst_element_size_bits <= 8) {
             TTSIM_VERIFY(!(count & 15), UnimplementedFunctionality, "bfp with count=%d", count);
+        }
+        if (is_bfp_format(pack_dst_format)) { // exponents past their section overlap the data, in no defined order
+            TTSIM_VERIFY(p_tensix->packer_dst_exp_addr[packer] + count / 16 <= p_tensix->packer_dst_data_start[packer],
+                UnpredictableValue, "bfp exponents past Exp_section_size");
         }
         uint32_t dst_addr = p_tensix->packer_dst_addr[packer];
         uint32_t dst_exp_addr = p_tensix->packer_dst_exp_addr[packer];
@@ -2483,23 +2498,24 @@ TENSIX_EXECUTE_PACR() {
                             }
                         } else if (intermediate_format == 14) {
                             TTSIM_VERIFY(!read_raw, UnimplementedFunctionality, "int32 to int8: read_raw=%d", read_raw);
-                            if (read_unsigned) {
-                                if (value & 0x80000000) {
-                                    value = 0; // clamp negative to 0
-                                } else if (value > 255) {
-                                    value = 255; // clamp positive to 255
-                                }
-                            } else { // preserve sign bit, clamp magnitude to 127
-                                value = ((value & 0x80000000) >> 24) | std::min(value & 0x7FFFFFFFu, 127u);
+                            if (read_unsigned) { // the sign is dropped: a negative value packs as its magnitude
+                                value = std::min(value & 0x7FFFFFFFu, 255u);
+                            } else { // -0 packs as +0
+                                uint32_t mag = std::min(value & 0x7FFFFFFFu, 127u);
+                                value = mag ? (((value & 0x80000000) >> 24) | mag) : 0;
                             }
 #if TT_ARCH_VERSION == 1
                         } else if (intermediate_format == 1) {
-                            if ((value & 0x7FFFFFFF) > 0x7F800000) {
-                                value = (value & 0x80000000) | 0x7F800000;
-                            }
-                            value = (value + 0x1000) >> 13; // round to TF32
-                            if ((value & 0x3FFFF) < 0x400) {
-                                value = 0;
+                            if (read_raw) {
+                                value >>= 13; // truncate to TF32, keeping NaN, denormals and -0
+                            } else {
+                                if ((value & 0x7FFFFFFF) > 0x7F800000) {
+                                    value = (value & 0x80000000) | 0x7F800000;
+                                }
+                                value = (value + 0x1000) >> 13; // round to TF32
+                                if ((value & 0x3FFFF) < 0x400) {
+                                    value = 0;
+                                }
                             }
 #endif
                         } else if ((intermediate_format != 0) && (intermediate_format != 8)) {
@@ -2539,10 +2555,6 @@ TENSIX_EXECUTE_PACR() {
                         if (!read_raw && ((value & 0x7FFF) < 0x80)) {
                             value = 0;
                         }
-#if TT_ARCH_VERSION == 1
-                    } else if (intermediate_format == 0) { // bf16 widened to fp32, keeping NaN, denormals and -0
-                        value = uint32_t(dst_decode_bf16(value)) << 16;
-#endif
                     } else if (intermediate_format != 9) {
                         TTSIM_ERROR(UnimplementedFunctionality, "dst16b intermediate_format=%d", intermediate_format);
                     }
@@ -2551,6 +2563,10 @@ TENSIX_EXECUTE_PACR() {
                     TTSIM_VERIFY(apply_relu <= 3, UnsupportedFunctionality, "apply_relu=%d", apply_relu);
                     TTSIM_VERIFY((apply_relu == 1) || !(p_config->STACC_RELU_ReluThreshold & 0x8000), UndefinedBehavior,
                         "negative relu_threshold=0x%x", p_config->STACC_RELU_ReluThreshold);
+                    TTSIM_VERIFY((apply_relu != 3) || !is_bfp_format(pack_dst_format) || (intermediate_format == 0) ||
+                                 !(p_config->STACC_RELU_ReluThreshold & 0x7FFF) ||
+                                 (p_config->STACC_RELU_ReluThreshold & ((intermediate_format == 2) ? 0x7C00 : 0x7F80)),
+                        UnsupportedFunctionality, "denormal relu_threshold=0x%x to bfp", p_config->STACC_RELU_ReluThreshold);
                     TTSIM_VERIFY((intermediate_format == 0) || (intermediate_format == 1) || (intermediate_format == 2) ||
                                  (intermediate_format == 5) || (intermediate_format == 6) || (intermediate_format == 8),
                         UnimplementedFunctionality, "relu intermediate_format=%d",
@@ -2573,13 +2589,15 @@ TENSIX_EXECUTE_PACR() {
                     } else
 #endif
                     if ((intermediate_format == 1) || (intermediate_format == 2) || (intermediate_format == 5) || (intermediate_format == 6)) {
+                        // the first half of each group of datums (columns 0-7 on Blackhole, 0-3 and 8-11 on Wormhole)
+                        // keeps an fp16 value equal to the threshold whose low 3 mantissa bits aren't 0
 #if TT_ARCH_VERSION == 1
-                        // columns 0-7 keep an fp16 value equal to the threshold whose low 3 mantissa bits aren't 0
-                        bool keep_equal = (intermediate_format == 1) && (col < 8) &&
-                            (p_config->STACC_RELU_ReluThreshold & 7);
+                        bool first_half = col < 8;
 #else
-                        bool keep_equal = false;
+                        bool first_half = !(col & 4);
 #endif
+                        bool keep_equal = (intermediate_format == 1) && first_half &&
+                            (p_config->STACC_RELU_ReluThreshold & 7);
                         if (value & 0x8000) {
                             value = 0;
                         }
@@ -2758,6 +2776,18 @@ TENSIX_EXECUTE_PACR() {
         if (last || flush) { // zero-pad partial section tails to the next 16B boundary
             uint32_t data_end = p_tensix->packer_dst_addr[packer];
             uint32_t data_pad_end = (data_end + 15) & ~15u;
+#if TT_ARCH_VERSION == 1
+            // these narrowing late conversions write a partial last group of 128 input bytes as twice its input, up
+            // to the whole group
+            if (((pack_src_format == 0) && (pack_dst_format == 1)) || ((pack_src_format == 1) && (pack_dst_format == 10)) ||
+                ((pack_src_format == 5) && is_bfp_format(pack_dst_format))) {
+                uint32_t group = (128 * dst_element_size_bits) / src_element_size_bits;
+                uint32_t tail = (data_end - p_tensix->packer_dst_data_start[packer]) % group;
+                if (tail) {
+                    data_pad_end = std::max(data_pad_end, data_end - tail + std::min(2 * tail, group));
+                }
+            }
+#endif
             if (data_end != data_pad_end) {
                 TTSIM_VERIFY(data_pad_end <= TENSIX_SRAM_SIZE, UndefinedBehavior, "pad out of bounds data_pad_end=0x%x", data_pad_end);
                 uint8_t *sram = g_t_tiles[p_tensix->tile_id].sram;
@@ -2953,6 +2983,8 @@ TENSIX_EXECUTE_UNPACR() {
     TTSIM_VERIFY(!(ch1_z_stride & (out_element_align - 1)), UnsupportedFunctionality, "misaligned ch1_z_stride=%d", ch1_z_stride);
     TTSIM_VERIFY(!(ch1_w_stride & (out_element_align - 1)), UnsupportedFunctionality, "misaligned ch1_w_stride=%d", ch1_w_stride);
 
+    // the instruction's address counter context (0) supplies X and Y, the issuing thread Z, W and channel 1 Y/Z/W
+    TensixAddrCtrl *p_xy_ctrl = &p_tensix->addr_ctrl[0][unpack_block_selection];
     TensixAddrCtrl *p_addr_ctrl = &p_tensix->addr_ctrl[pipe][unpack_block_selection];
     bool haloize = unpack_block_selection ? p_config->THCON_SEC1_REG2_Haloize_mode
                                           : p_config->THCON_SEC0_REG2_Haloize_mode;
@@ -2998,8 +3030,8 @@ TENSIX_EXECUTE_UNPACR() {
         uint32_t num_exponents = (num_elements + 15) / 16; // 1 exponent per 16 sign/magnitudes
         base_addr += (num_exponents + 15) & ~15; // always make exponents a multiple of 16B
     }
-    uint32_t first_datum = p_addr_ctrl->ch0_x +
-                           (p_addr_ctrl->ch0_y & 0xFF) * ch0_y_stride +
+    uint32_t first_datum = p_xy_ctrl->ch0_x +
+                           (p_xy_ctrl->ch0_y & 0xFF) * ch0_y_stride +
                            (p_addr_ctrl->ch0_z & 0xFF) * ch0_z_stride +
                            (p_addr_ctrl->ch0_w & 0xFF) * ch0_w_stride;
     if (bfp_exp_stream) {
@@ -3050,9 +3082,9 @@ TENSIX_EXECUTE_UNPACR() {
     TTSIM_VERIFY(!col_shift, UnsupportedFunctionality, "col_shift=%d", col_shift);
 
     uint32_t x_limit = 65536 / std::max(8u, in_element_size_bits);
-    TTSIM_VERIFY(p_addr_ctrl->ch1_x < x_limit, UndefinedBehavior, "ch1_x=%d exceeds x_limit=%d", p_addr_ctrl->ch1_x, x_limit);
-    TTSIM_VERIFY(p_addr_ctrl->ch0_x <= p_addr_ctrl->ch1_x, UndefinedBehavior, "invalid ch0_x=%d ch1_x=%d", p_addr_ctrl->ch0_x, p_addr_ctrl->ch1_x);
-    uint32_t count = p_addr_ctrl->ch1_x - p_addr_ctrl->ch0_x + 1;
+    TTSIM_VERIFY(p_xy_ctrl->ch1_x < x_limit, UndefinedBehavior, "ch1_x=%d exceeds x_limit=%d", p_xy_ctrl->ch1_x, x_limit);
+    TTSIM_VERIFY(p_xy_ctrl->ch0_x <= p_xy_ctrl->ch1_x, UndefinedBehavior, "invalid ch0_x=%d ch1_x=%d", p_xy_ctrl->ch0_x, p_xy_ctrl->ch1_x);
+    uint32_t count = p_xy_ctrl->ch1_x - p_xy_ctrl->ch0_x + 1;
     if (bfp_exp_stream) {
         TTSIM_VERIFY(first_datum + count <= 65536, UndefinedBehavior,
             "bfp exponent index out of range: first_datum=%d count=%d", first_datum, count);
@@ -3182,8 +3214,14 @@ TENSIX_EXECUTE_UNPACR() {
                 TTSIM_VERIFY(!unpack_to_dst, UnimplementedFunctionality, "unpack_to_dst=%d in_data_format=%d", unpack_to_dst, in_data_format);
                 value = ((value & 0x8000) << 16) | ((value & 0x7FFF) << 13);
             } else if (in_data_format == 5) {
+#if TT_ARCH_VERSION == 0
                 TTSIM_VERIFY(!unpack_to_dst, UnimplementedFunctionality, "unpack_to_dst=%d in_data_format=%d", unpack_to_dst, in_data_format);
-                value <<= 16; // bf16 -> fp32 in Src
+#endif
+                if (unpack_to_dst) {
+                    value = dst_encode_bf16(value);
+                } else {
+                    value <<= 16; // bf16 -> fp32 in Src
+                }
             } else if (in_data_format == 8) {
                 TTSIM_VERIFY(unpack_to_dst, UndefinedBehavior, "unpack_to_dst=%d in_data_format=%d", unpack_to_dst, in_data_format);
                 value = dst_encode_fp32(value);
@@ -3253,10 +3291,16 @@ TENSIX_EXECUTE_UNPACR() {
         }
     }
 
-    p_addr_ctrl->ch0_z = (p_addr_ctrl->ch0_z + bits<1,0>(addr_mode)) & ADC_Z_MASK;
-    p_addr_ctrl->ch0_y = (p_addr_ctrl->ch0_y + bits<3,2>(addr_mode)) & ADC_Y_MASK;
-    p_addr_ctrl->ch1_z = (p_addr_ctrl->ch1_z + bits<5,4>(addr_mode)) & ADC_Z_MASK;
-    p_addr_ctrl->ch1_y = (p_addr_ctrl->ch1_y + bits<7,6>(addr_mode)) & ADC_Y_MASK;
+    auto increment = [=](TensixAddrCtrl *p) {
+        p->ch0_z = (p->ch0_z + bits<1,0>(addr_mode)) & ADC_Z_MASK;
+        p->ch0_y = (p->ch0_y + bits<3,2>(addr_mode)) & ADC_Y_MASK;
+        p->ch1_z = (p->ch1_z + bits<5,4>(addr_mode)) & ADC_Z_MASK;
+        p->ch1_y = (p->ch1_y + bits<7,6>(addr_mode)) & ADC_Y_MASK;
+    };
+    increment(p_addr_ctrl);
+    if (pipe) {
+        increment(p_xy_ctrl); // the context's counters advance too
+    }
 
     if (set_dat_valid) {
         if (unpack_block_selection) {
@@ -3612,7 +3656,7 @@ TENSIX_EXECUTE_STOREREG() {
     // Be careful here to avoid infinite recursion by injecting instructions into pipe
     // For safety, we only allow overlay registers to be written via this path
     switch (addr) {
-        case NOC_OVERLAY_BASE ... NOC_OVERLAY_BASE + 0x3FFFF: {
+        case NOC_OVERLAY_BASE ... NOC_OVERLAY_LIMIT: {
             bool done = tile_mmio_wr32('T', p_tensix->tile_id, 0xFFFFFFFF, addr, p_tensix->dma_regs[pipe][tdma_data_reg_index]); // no riscv_id in this path
             TTSIM_VERIFY(done, AssertionFailure, "tile_mmio_wr32 failed: addr=0x%llx", addr); // needs to be nonblocking
             break;
@@ -4681,16 +4725,7 @@ TENSIX_EXECUTE_SFPCAST() {
         } else
 #endif
         {
-            dst = sign; // preserve sign bit, including for -0
-            src &= 0x7FFFFFFF; // extract magnitude
-            if (src) { // if magnitude is nonzero
-                uint32_t lz = __builtin_clz(src);
-                src <<= lz;
-                dst |= ((157 - lz) << 23) + (src >> 8);
-                if ((src & 0x80) && (src & 0x17F)) { // RTNE
-                    dst++;
-                }
-            }
+            dst = sign | std::bit_cast<uint32_t>(float(int32_t(src & 0x7FFFFFFF))); // RTNE, keeping the sign of -0
         }
         p_tensix->l_regs[lreg_dest][lane] = dst;
     });
@@ -5051,6 +5086,66 @@ TENSIX_EXECUTE_ATRELM() {
     return true;
 }
 
+// Whether a latched wait with this block mask holds the instruction at the Wait Gate (STALLWAIT.md, "Block mask"). A
+// later wait instruction waits for the latched one to go, and 0x1FF holds everything, NOPs included.
+static bool block_mask_holds(uint32_t block, uint32_t inst) {
+    if (block == 0x1FF) {
+        return true;
+    }
+    uint32_t held_by;
+    switch (bits<31,24>(inst)) {
+        case TENSIX_OPCODE_NOP:
+            held_by = 0;
+            break;
+        case TENSIX_OPCODE_ATGETM:
+        case TENSIX_OPCODE_ATRELM:
+        case TENSIX_OPCODE_SEMINIT:
+        case TENSIX_OPCODE_SEMPOST:
+        case TENSIX_OPCODE_SEMGET:
+#if TT_ARCH_VERSION == 0
+        case TENSIX_OPCODE_SEMWAIT:
+#endif
+            held_by = 0x002;
+            break;
+        case TENSIX_OPCODE_STALLWAIT:
+#if TT_ARCH_VERSION == 1
+        case TENSIX_OPCODE_SEMWAIT:
+        case TENSIX_OPCODE_STREAMWAIT:
+#endif
+            return true;
+        case 0x08 ... 0x3F:
+            held_by = 0x040;
+            break;
+        case TENSIX_OPCODE_XMOV:
+            held_by = 0x011;
+            break;
+        case TENSIX_OPCODE_PACR:
+        case TENSIX_OPCODE_PACR_SETREG:
+        case TENSIX_OPCODE_TBUFCMD:
+            held_by = 0x005;
+            break;
+        case TENSIX_OPCODE_UNPACR:
+        case TENSIX_OPCODE_UNPACR_NOP:
+            held_by = 0x009;
+            break;
+        case TENSIX_OPCODE_SETGPR ... TENSIX_OPCODE_LOADIND:
+        case TENSIX_OPCODE_ADDGPR ... TENSIX_OPCODE_CMPGPR:
+        case TENSIX_OPCODE_DMANOP ... TENSIX_OPCODE_LOADREG:
+            held_by = 0x021;
+            break;
+        case TENSIX_OPCODE_SFPLOAD ... 0x9F:
+            held_by = 0x100;
+            break;
+        case 0xB0 ... 0xB9:
+            held_by = 0x080;
+            break;
+        default:
+            held_by = 0x001;
+            break;
+    }
+    return held_by & block;
+}
+
 // XXX we ignore stall_res and currently block all downstream instructions from issuing, regardless of type
 TENSIX_EXECUTE_STALLWAIT() {
     TTSIM_VERIFY(wait_res, UnsupportedFunctionality, "wait_res=0x%x", wait_res);
@@ -5105,6 +5200,8 @@ TENSIX_EXECUTE_STALLWAIT() {
     }
 #endif
     TTSIM_VERIFY(!wait_res, UnimplementedFunctionality, "wait_res=0x%x", wait_res);
+    p_tensix->wait_block[pipe] = stall_res;
+    p_tensix->wait_sems[pipe] = 0;
     return true;
 }
 
@@ -5112,6 +5209,8 @@ TENSIX_EXECUTE_SEMINIT() {
     TTSIM_VERIFY(__builtin_popcount(sem_sel) == 1, UnsupportedFunctionality, "sem_sel=0x%x is not one-hot", sem_sel);
     uint32_t sem_index = __builtin_ctz(sem_sel);
     TTSIM_VERIFY(sem_index < std::size(p_tensix->sem), AssertionFailure, "sem_index=%d out of range", sem_index);
+    TTSIM_VERIFY(!(p_tensix->wait_block[pipe] && (sem_sel & p_tensix->wait_sems[pipe])), UndefinedBehavior,
+        "sem_sel=0x%x: may pass this thread's SEMWAIT on it, whose block mask 0x%x lacks B1", sem_sel, p_tensix->wait_block[pipe]);
     TTSIM_VERIFY(init_value <= max_value, NonContractualBehavior, "init_value=%d is greater than max_value=%d", init_value, max_value);
 
     p_tensix->sem[sem_index] = init_value;
@@ -5123,6 +5222,8 @@ TENSIX_EXECUTE_SEMPOST() {
     TTSIM_VERIFY(__builtin_popcount(sem_sel) == 1, UnsupportedFunctionality, "sem_sel=0x%x is not one-hot", sem_sel);
     uint32_t sem_index = __builtin_ctz(sem_sel);
     TTSIM_VERIFY(sem_index < std::size(p_tensix->sem), AssertionFailure, "sem_index=%d out of range", sem_index);
+    TTSIM_VERIFY(!(p_tensix->wait_block[pipe] && (sem_sel & p_tensix->wait_sems[pipe])), UndefinedBehavior,
+        "sem_sel=0x%x: may pass this thread's SEMWAIT on it, whose block mask 0x%x lacks B1", sem_sel, p_tensix->wait_block[pipe]);
 
     TTSIM_VERIFY(p_tensix->sem[sem_index] < p_tensix->sem_max[sem_index], NonContractualBehavior,
         "sem=%d sem_max=%d", p_tensix->sem[sem_index], p_tensix->sem_max[sem_index]);
@@ -5134,6 +5235,8 @@ TENSIX_EXECUTE_SEMGET() {
     TTSIM_VERIFY(__builtin_popcount(sem_sel) == 1, UnsupportedFunctionality, "sem_sel=0x%x is not one-hot", sem_sel);
     uint32_t sem_index = __builtin_ctz(sem_sel);
     TTSIM_VERIFY(sem_index < std::size(p_tensix->sem), AssertionFailure, "sem_index=%d out of range", sem_index);
+    TTSIM_VERIFY(!(p_tensix->wait_block[pipe] && (sem_sel & p_tensix->wait_sems[pipe])), UndefinedBehavior,
+        "sem_sel=0x%x: may pass this thread's SEMWAIT on it, whose block mask 0x%x lacks B1", sem_sel, p_tensix->wait_block[pipe]);
 
     TTSIM_VERIFY(p_tensix->sem[sem_index], NonContractualBehavior, "sem=%d sem_max=%d", p_tensix->sem[sem_index], p_tensix->sem_max[sem_index]);
     p_tensix->sem[sem_index]--;
@@ -5144,10 +5247,18 @@ TENSIX_EXECUTE_SEMWAIT() {
     TTSIM_VERIFY(__builtin_popcount(sem_sel) == 1, UnsupportedFunctionality, "sem_sel=0x%x is not one-hot", sem_sel);
     TTSIM_VERIFY(wait_sem_cond, UndefinedBehavior, "wait_sem_cond=%d", wait_sem_cond);
     TTSIM_VERIFY((wait_sem_cond == 1) || (wait_sem_cond == 2), UnsupportedFunctionality, "wait_sem_cond=%d", wait_sem_cond);
-    // XXX stall_res ignored for now
+    // XXX the thread stops here whatever stall_res says
+    uint32_t block = stall_res ? stall_res : 0x040;
+#if TT_ARCH_VERSION == 0
+    // Replacing a latched wait with an identical one loses nothing
+    TTSIM_VERIFY(!p_tensix->wait_block[pipe] || ((p_tensix->wait_block[pipe] == block) &&
+                                                 (p_tensix->wait_sems[pipe] == sem_sel) &&
+                                                 (p_tensix->wait_sem_cond[pipe] == wait_sem_cond)),
+        UndefinedBehavior, "may replace this thread's latched wait, whose block mask 0x%x lacks B1", p_tensix->wait_block[pipe]);
+#endif
 
-    for (; sem_sel; sem_sel &= sem_sel - 1) {
-        uint32_t sem_index = __builtin_ctz(sem_sel);
+    for (uint32_t sems = sem_sel; sems; sems &= sems - 1) {
+        uint32_t sem_index = __builtin_ctz(sems);
         TTSIM_VERIFY(sem_index < std::size(p_tensix->sem), AssertionFailure, "sem_index=%d out of range", sem_index);
         if (wait_sem_cond == 2) { // wait while max
             if (p_tensix->sem[sem_index] >= p_tensix->sem_max[sem_index]) {
@@ -5159,6 +5270,11 @@ TENSIX_EXECUTE_SEMWAIT() {
             }
         }
     }
+    p_tensix->wait_block[pipe] = block;
+    p_tensix->wait_sems[pipe] = sem_sel;
+#if TT_ARCH_VERSION == 0
+    p_tensix->wait_sem_cond[pipe] = wait_sem_cond;
+#endif
     return true;
 }
 
@@ -5337,5 +5453,8 @@ static bool tensix_execute_inst(TensixState *p_tensix, uint32_t pipe, uint32_t i
 }
 
 bool tensix_decode_and_execute(TensixState *p_tensix, uint32_t pipe, uint32_t inst) {
+    if (p_tensix->wait_block[pipe] && block_mask_holds(p_tensix->wait_block[pipe], inst)) {
+        p_tensix->wait_block[pipe] = 0;
+    }
     return tensix_execute_inst(p_tensix, pipe, inst);
 }
