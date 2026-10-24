@@ -8,7 +8,10 @@
 
 const uint32_t g_num_chips = NUM_CHIPS;
 const uint32_t g_num_mmio_chips = NUM_MMIO_CHIPS;
-ChipState g_chips[NUM_CHIPS];
+#if defined(NUM_MEM_CHIPS)
+const uint32_t g_num_mem_chips = NUM_MEM_CHIPS;
+#endif
+ChipState g_chips[std::max(NUM_CHIPS, NUM_MMIO_CHIPS)]; // an MMIO chip's PCIe tile lives here even with no chip behind it
 uint32_t g_current_chip_id;
 ChipState *g_chip = g_chips;
 uint64_t g_clock;
@@ -43,7 +46,7 @@ void ttsim_init() {
 }
 
 void ttsim_select_chip(uint32_t chip_id) {
-    TTSIM_VERIFY(chip_id < g_num_chips, ConfigurationError, "chip_id=%d", chip_id);
+    TTSIM_VERIFY(chip_id < std::size(g_chips), ConfigurationError, "chip_id=%d", chip_id);
     g_current_chip_id = chip_id;
     g_chip = &g_chips[chip_id];
 }

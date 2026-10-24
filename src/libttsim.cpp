@@ -222,6 +222,7 @@ static bool t_tile_active(const TensixTile *p_tile) {
     uint32_t active = p_tile->rv32_cores_active;
     for (uint32_t tensix_id = 0; tensix_id < std::size(p_tile->tensix); tensix_id++) {
         active |= p_tile->tensix[tensix_id].inst_pipes_active;
+        active |= p_tile->tensix[tensix_id].expand_pipes_active;
     }
     return active;
 }
@@ -240,6 +241,9 @@ static void clock_current_chip() {
             [[maybe_unused]] bool any_tensix = false;
             for (uint32_t tensix_id = 0; tensix_id < std::size(p_tile->tensix); tensix_id++) {
                 TensixState *p_tensix = &p_tile->tensix[tensix_id];
+                for (uint32_t pipe_mask = p_tensix->expand_pipes_active; pipe_mask; pipe_mask &= pipe_mask - 1) {
+                    tensix_frontend_step(p_tensix, __builtin_ctz(pipe_mask));
+                }
                 for (uint32_t pipe_mask = p_tensix->inst_pipes_active; pipe_mask; pipe_mask &= pipe_mask - 1) {
                     uint32_t pipe = __builtin_ctz(pipe_mask);
                     uint32_t inst_rd_ptr = p_tensix->inst_rd_ptr[pipe];

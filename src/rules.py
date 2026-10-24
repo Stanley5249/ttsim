@@ -7,15 +7,15 @@ CHIPS = [
     (1, 'bh'),
 ]
 CONFIGS = [
-    # (tt_arch_version, chip, data_chip, num_chips, num_mmio_chips)
-    (0, 'wh',     'wh',  1,  1),
-    (0, 'wh_x2',  'wh',  2,  1),
-    (0, 'wh_x8',  'wh',  8,  4), # T3000/LoudBox: 4 n300 cards (4 MMIO + 4 eth-tunneled), 4x2 mesh
-    (0, 'wh_x32', 'wh', 32, 32), # WH Galaxy (6U): 32 WH chips, 8x4 mesh, all MMIO (BDF)
-    (1, 'bh',     'bh',  1,  1),
-    (1, 'bh_x2',  'bh',  2,  2),
-    (1, 'bh_x4',  'bh',  4,  4), # QuietBox 2: two P300 cards, 2x2 mesh, all MMIO
-    (1, 'bh_x32', 'bh', 32, 32), # BH Galaxy: 32 BH chips, 8x4 torus xy, all MMIO (BDF)
+    # (tt_arch_version, chip, data_chip, num_chips, num_mmio_chips, num_mem_chips)
+    (0, 'wh',     'wh',  1,  1, None),
+    (0, 'wh_x2',  'wh',  2,  1, None),
+    (0, 'wh_x8',  'wh',  8,  4, None), # T3000/LoudBox: 4 n300 cards (4 MMIO + 4 eth-tunneled), 4x2 mesh
+    (0, 'wh_x32', 'wh', 32, 32, None), # WH Galaxy (6U): 32 WH chips, 8x4 mesh, all MMIO (BDF)
+    (1, 'bh',     'bh',  1,  1, None),
+    (1, 'bh_x2',  'bh',  2,  2, None),
+    (1, 'bh_x4',  'bh',  4,  4, None), # QuietBox 2: two P300 cards, 2x2 mesh, all MMIO
+    (1, 'bh_x32', 'bh', 32, 32, None), # BH Galaxy: 32 BH chips, 8x4 torus xy, all MMIO (BDF)
 ]
 
 def rules(ctx):
@@ -95,7 +95,7 @@ def rules(ctx):
             shared_o_files[config, chip] = o_files
 
     build_targets = []
-    for (tt_arch_version, chip, data_chip, num_chips, num_mmio_chips) in CONFIGS:
+    for (tt_arch_version, chip, data_chip, num_chips, num_mmio_chips, num_mem_chips) in CONFIGS:
         if chip == 'bh_x32' and ctx.host.arch != 'x86_64':
             continue # -mcmodel=medium is x86_64 only; bh_x32 BSS of ~6.9GB is too large for aarch64
 
@@ -109,6 +109,8 @@ def rules(ctx):
                 f'-DNUM_MMIO_CHIPS={num_mmio_chips}',
                 f'-I_out/{data_chip}',
             ]
+            if num_mem_chips is not None:
+                gcc_opts += [f'-DNUM_MEM_CHIPS={num_mem_chips}']
             if num_chips >= 16 and ctx.host.arch == 'x86_64':
                 gcc_opts += ['-mcmodel=medium'] # required for >2GB BSS in very large (Galaxy) sims
 

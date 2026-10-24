@@ -132,6 +132,9 @@ extern void eth_yield_entry(void);
 // tt-metal's ROUTING_FW_RESERVED region (0x11000-0x18000), above UMD's tunnel queues/buffer at 0x11000.
 #define SEND_SEQ_ADDR 0x14810 // sender: next link sequence number
 #define LAST_RECV_SEQ_ADDR 0x14814 // receiver: last processed inbox sequence number
+// route_my_peer() / route_my_index(), cached at boot: the sim writes ROUTE_TABLE once, before the fw runs.
+#define MY_PEER_ADDR 0x14818
+#define MY_INDEX_ADDR 0x1481C
 #define REQ_INBOX_ADDR 0x14900 // peer -> me: forwarded remote-queue requests
 #define RESP_INBOX_ADDR 0x14A00 // peer -> me: acks / read responses
 #define OUTBOX_ADDR 0x14B00 // me -> peer: staged header packet
@@ -139,9 +142,11 @@ extern void eth_yield_entry(void);
 // Max bytes staged in a block buffer per transfer -- bounds BLOCK_BUF / NOC_BLOCK_STAGE so the fw's code,
 // scratch, and stack all fit in the 20KB above 0x13000. DRAM/block transfers chunk to this; larger
 // requests are split into multiple chunks.
-#define ETH_BLOCK_CHUNK 2048u
+#define ETH_BLOCK_CHUNK 4096u
+// A block write lands in the peer's BLOCK_BUF at (target & 15), a block read at (target & 63), so the receiver
+// NOC-accesses the target in place.
 #define BLOCK_BUF_ADDR 0x15600 // block payload staged for / landed from the link (holds an ETH_BLOCK_CHUNK)
-#define NOC_BLOCK_STAGE_ADDR 0x15F00 // receiver: block/broadcast NOC source/dest, alignment-matched to the target
+#define NOC_BLOCK_STAGE_ADDR 0x16700 // block/broadcast NOC source realigned to the target, when the source is not
 // A host broadcast payload follows a 32-byte header, so its fixed read/link slot is 32 mod 64. The ERISC
 // that issues a multicast copies the payload to the NOC stage at the destination's mod-16 offset.
 #define BCAST_READ_ADDR (BLOCK_BUF_ADDR + BROADCAST_HEADER_SIZE)
@@ -165,13 +170,23 @@ extern void eth_yield_entry(void);
 #define RELAY_RESP_ADDR 0x15500     // ingress: reply slot the egress writes back {seq, data}
 #define RELAY_SEND_SEQ_ADDR 0x15510 // ingress: next relay sequence number (per ingress core)
 #define RELAY_WAIT_ADDR 0x15514     // ingress: 1 while a posted relay awaits its reply (non-blocking)
+// Egress: nonzero once a sibling has posted to any slot; the egress clears it and scans its slots, keeping
+// its idle poll short however many siblings it has.
+#define RELAY_DOORBELL_ADDR 0x15520
 // Ingress landing buffer for a relayed block read. Distinct from BLOCK_BUF because the ingress keeps
 // using BLOCK_BUF for its receiver/egress roles while the relay is in flight, and would clobber it.
-#define RELAY_RESP_BLOCK_ADDR 0x16800
+#define RELAY_RESP_BLOCK_ADDR 0x17740
 _Static_assert((BCAST_CHUNK & 63u) == 0, "broadcast chunks must preserve host and destination alignment");
 _Static_assert(BCAST_READ_ADDR + BCAST_CHUNK <= NOC_BLOCK_STAGE_ADDR, "broadcast read and NOC stages overlap");
 _Static_assert(NOC_BLOCK_STAGE_ADDR + 15u + BCAST_CHUNK <= RELAY_RESP_BLOCK_ADDR,
     "destination-aligned broadcast stage overlaps relay response buffer");
+_Static_assert(BLOCK_BUF_ADDR % 64u == 0 && BLOCK_BUF_ADDR + 63u + ETH_BLOCK_CHUNK <= NOC_BLOCK_STAGE_ADDR,
+    "target-aligned block buffer overlaps NOC stage");
+_Static_assert(NOC_BLOCK_STAGE_ADDR + 15u + ETH_BLOCK_CHUNK <= RELAY_RESP_BLOCK_ADDR,
+    "destination-aligned block stage overlaps relay response buffer");
+// The stack grows down from ETH_FW_STACK_TOP (0x18000, rules.py) and needs under 300 bytes; keep 1 KiB.
+_Static_assert(RELAY_RESP_BLOCK_ADDR + 63u + MAX_L1_BLOCK_SIZE <= 0x18000u - 1024u,
+    "relay response buffer crowds the stack");
 // Relay request slot (32 bytes). The whole slot lands in one NOC write, so the egress polls RLY_SEQ safely.
 #define RLY_OP 4
 #define RLY_SYS_LO 8
@@ -266,6 +281,22 @@ static void eth_send(uint32_t dst, uint32_t src, uint32_t size) {
     PHYS_WR32(ETH_TXQ_BASE + ETH_TXQ_CMD, ETH_TXQ_CMD_START_DATA);
 }
 
+// Address of the `size` bytes at `src` with the alignment of `addr` mod 16, as a NOC write to `addr` needs:
+// `src` itself if it already matches, else a copy in the NOC stage.
+static uint32_t realign16(uint32_t src, uint32_t addr, uint32_t size) {
+    if (!((src ^ addr) & 15u)) {
+        return src;
+    }
+    l1_copy(NOC_BLOCK_STAGE_ADDR + (addr & 15u), src, size);
+    return NOC_BLOCK_STAGE_ADDR + (addr & 15u);
+}
+
+// Ship the `size` bytes at local `src` to the link peer's BLOCK_BUF + (target & 15).
+static void eth_send_block(uint32_t src, uint32_t target, uint32_t size) {
+    src = realign16(src, target, size);
+    eth_send(BLOCK_BUF_ADDR, src & ~15u, round16((src & 15u) + size));
+}
+
 // --- Multi-hop relay: route a command to the local eth core that peers its target chip (see ROUTE_TABLE) ---
 static uint32_t my_noc_coord(void) {
     return PHYS_RD32(NOC0_REGS_BASE + NOC_NODE_ID) & 0xFFF;
@@ -275,28 +306,27 @@ static inline bool routing_enabled(void) {
     return PHYS_RD32(ROUTING_FIRMWARE_STATE) == 0;
 }
 
-// Mesh coord of the chip THIS eth core's link peers (from its own route-table entry).
-static uint32_t route_my_peer(void) {
+// Find this eth core's own route-table entry: the mesh coord of the chip its link peers (0xFFFFFFFF if
+// none), and its index -- also its request-slot index on any egress core.
+static void route_cache_init(void) {
     uint32_t my = my_noc_coord();
     uint32_t n = PHYS_RD32(ROUTE_TABLE_ADDR);
+    PHYS_WR32(MY_PEER_ADDR, 0xFFFFFFFF);
+    PHYS_WR32(MY_INDEX_ADDR, 0);
     for (uint32_t i = 0; i < n; i++) {
         if (PHYS_RD32(ROUTE_TABLE_ADDR + 4 + 8 * i + 4) == my) {
-            return PHYS_RD32(ROUTE_TABLE_ADDR + 4 + 8 * i);
+            PHYS_WR32(MY_PEER_ADDR, PHYS_RD32(ROUTE_TABLE_ADDR + 4 + 8 * i));
+            PHYS_WR32(MY_INDEX_ADDR, i);
+            return;
         }
     }
-    return 0xFFFFFFFF;
 }
 
-// This eth core's index in the route table -- also its request-slot index on any egress core.
+static uint32_t route_my_peer(void) {
+    return PHYS_RD32(MY_PEER_ADDR);
+}
 static uint32_t route_my_index(void) {
-    uint32_t my = my_noc_coord();
-    uint32_t n = PHYS_RD32(ROUTE_TABLE_ADDR);
-    for (uint32_t i = 0; i < n; i++) {
-        if (PHYS_RD32(ROUTE_TABLE_ADDR + 4 + 8 * i + 4) == my) {
-            return i;
-        }
-    }
-    return 0;
+    return PHYS_RD32(MY_INDEX_ADDR);
 }
 
 // NOC coord of the local eth core that link-peers chip `tc`, or 0xFFFFFFFF if none is on this chip.
@@ -328,12 +358,11 @@ static void noc_get(uint32_t coord, uint32_t src, uint32_t dst, uint32_t size) {
 // Stream the host-DRAM broadcast payload (past its 32-byte header) in chunks, multicasting each to this
 // chip's tensix grid. `tag` is the host-window offset of the block; `sys_lo` the per-tensix L1 dest.
 static void bcast_to_grid(uint32_t sys_lo, uint32_t tag, uint32_t payload) {
-    uint32_t stage = NOC_BLOCK_STAGE_ADDR + (sys_lo & 15u);
     for (uint32_t done = 0; done < payload; done += BCAST_CHUNK) {
         uint32_t chunk = payload - done < BCAST_CHUNK ? payload - done : BCAST_CHUNK;
         uint64_t src = PCIE_HOST_WINDOW_BASE + tag + BROADCAST_HEADER_SIZE + done;
         noc_read((uint32_t)src, (PCIE_COORD << 4) | (uint32_t)((src >> 32) & 0xF), BCAST_READ_ADDR, chunk);
-        l1_copy(stage, BCAST_READ_ADDR, chunk);
+        uint32_t stage = realign16(BCAST_READ_ADDR, sys_lo, chunk);
         noc_multicast(sys_lo + done, TENSIX_GRID_START, TENSIX_GRID_END, stage, chunk);
     }
 }
@@ -363,9 +392,10 @@ static void dram_write_to_peer(uint32_t sys_lo, uint32_t sys_hi, uint32_t tag, u
     for (uint32_t done = 0; done < size; done += ETH_BLOCK_CHUNK) {
         uint32_t chunk = size - done < ETH_BLOCK_CHUNK ? size - done : ETH_BLOCK_CHUNK;
         uint64_t src = PCIE_HOST_WINDOW_BASE + tag + done;
-        noc_read((uint32_t)src, (PCIE_COORD << 4) | (uint32_t)((src >> 32) & 0xF), BLOCK_BUF_ADDR, chunk);
+        uint32_t buf = BLOCK_BUF_ADDR + ((uint32_t)src & 63u);
+        noc_read((uint32_t)src, (PCIE_COORD << 4) | (uint32_t)((src >> 32) & 0xF), buf, chunk);
         uint32_t seq = ++(*send_seq);
-        eth_send(BLOCK_BUF_ADDR, BLOCK_BUF_ADDR, round16(chunk));
+        eth_send_block(buf, sys_lo + done, chunk);
         PHYS_WR32(OUTBOX_ADDR + PKT_SEQ, seq);
         PHYS_WR32(OUTBOX_ADDR + PKT_OP, OP_BLOCK_WRITE);
         PHYS_WR32(OUTBOX_ADDR + PKT_ADDR_LO, sys_lo + done); // target advances per chunk (no 4 GiB carry expected)
@@ -378,7 +408,7 @@ static void dram_write_to_peer(uint32_t sys_lo, uint32_t sys_hi, uint32_t tag, u
 }
 
 // DRAM-block read forward: block-read this core's link peer in NOC-sized chunks, pushing each landed chunk
-// (in BLOCK_BUF) to the host window. Used by the core that peers the target.
+// to the host window. Used by the core that peers the target.
 static void dram_read_to_host(uint32_t sys_lo, uint32_t sys_hi, uint32_t tag, uint32_t size, uint32_t *send_seq) {
     for (uint32_t done = 0; done < size; done += ETH_BLOCK_CHUNK) {
         uint32_t chunk = size - done < ETH_BLOCK_CHUNK ? size - done : ETH_BLOCK_CHUNK;
@@ -391,19 +421,20 @@ static void dram_read_to_host(uint32_t sys_lo, uint32_t sys_hi, uint32_t tag, ui
         eth_send(REQ_INBOX_ADDR, OUTBOX_ADDR, PKT_BYTES);
         while (PHYS_RD32(RESP_INBOX_ADDR + PKT_SEQ) != seq) {
         }
-        uint64_t dst = PCIE_HOST_WINDOW_BASE + tag + done; // the block landed in BLOCK_BUF
-        noc_write((uint32_t)dst, (PCIE_COORD << 4) | (uint32_t)((dst >> 32) & 0xF), BLOCK_BUF_ADDR, chunk);
+        uint64_t dst = PCIE_HOST_WINDOW_BASE + tag + done;
+        uint32_t buf = realign16(BLOCK_BUF_ADDR + ((sys_lo + done) & 63u), (uint32_t)dst, chunk);
+        noc_write((uint32_t)dst, (PCIE_COORD << 4) | (uint32_t)((dst >> 32) & 0xF), buf, chunk);
     }
 }
 
 // Do one single-hop remote access to this core's link peer and wait for the reply. For OP_BLOCK_WRITE the
 // block must be staged at `block_src` (shipped to the peer's BLOCK_BUF ahead of the header); for
-// OP_BLOCK_READ the block lands at BLOCK_BUF. Returns the read word for OP_READ.
+// OP_BLOCK_READ the block lands at BLOCK_BUF + (sys_lo & 63). Returns the read word for OP_READ.
 static uint32_t single_hop(uint32_t op, uint32_t sys_lo, uint32_t sys_hi, uint32_t size, uint32_t data,
                            uint32_t block_src, uint32_t *send_seq) {
     uint32_t seq = ++(*send_seq);
     if (op == OP_BLOCK_WRITE) {
-        eth_send(BLOCK_BUF_ADDR, block_src, round16(size));
+        eth_send_block(block_src, sys_lo, size);
     }
     PHYS_WR32(OUTBOX_ADDR + PKT_SEQ, seq);
     PHYS_WR32(OUTBOX_ADDR + PKT_OP, op);
@@ -435,6 +466,8 @@ static void relay_post(uint32_t egress, uint32_t op, uint32_t sys_lo, uint32_t s
     PHYS_WR32(OUTBOX_ADDR + RLY_INGRESS, my_noc_coord());
     PHYS_WR32(OUTBOX_ADDR + RLY_BLOCK, ingress_block);
     noc_put(egress, RELAY_REQ_BASE + route_my_index() * RELAY_SLOT_SIZE, OUTBOX_ADDR, RELAY_SLOT_SIZE);
+    PHYS_WR32(OUTBOX_ADDR + RELAY_SLOT_SIZE, 1);
+    noc_put(egress, RELAY_DOORBELL_ADDR, OUTBOX_ADDR + RELAY_SLOT_SIZE, 4); // lands after the slot write
 }
 
 // Post a relay and block until the egress replies. Only the broadcast fan-out uses this: a broadcast is
@@ -448,53 +481,45 @@ static void relay_wait(uint32_t egress, uint32_t op, uint32_t sys_lo, uint32_t s
     }
 }
 
-// Egress role: service relay requests siblings forwarded to us (we peer their target chip). For each new
-// request, do the single hop to our peer and write the reply back into the ingress core's RELAY_RESP.
-static void service_relay(uint32_t *send_seq) {
-    uint32_t n = PHYS_RD32(ROUTE_TABLE_ADDR);
-    for (uint32_t i = 0; i < n; i++) {
-        uint32_t slot = RELAY_REQ_BASE + i * RELAY_SLOT_SIZE;
-        uint32_t seq = PHYS_RD32(slot + PKT_SEQ);
-        if (seq == PHYS_RD32(RELAY_LAST_SEQ_BASE + 4 * i)) {
-            continue;
+// Egress role: service the new relay request sibling `i` forwarded to us (we peer its target chip): do the
+// single hop to our peer and write the reply back into the ingress core's RELAY_RESP.
+static __attribute__((noinline)) void service_relay(uint32_t i, uint32_t *send_seq) {
+    uint32_t slot = RELAY_REQ_BASE + i * RELAY_SLOT_SIZE;
+    uint32_t seq = PHYS_RD32(slot + PKT_SEQ);
+    uint32_t op = PHYS_RD32(slot + RLY_OP);
+    uint32_t size = PHYS_RD32(slot + RLY_SIZE);
+    uint32_t ingress = PHYS_RD32(slot + RLY_INGRESS);
+    uint32_t ingress_block = PHYS_RD32(slot + RLY_BLOCK);
+    uint32_t sys_lo = PHYS_RD32(slot + RLY_SYS_LO);
+    uint32_t reply = 0;
+    if (op == OP_BROADCAST) {
+        // A sibling forwarded a broadcast whose target remote we link-peer: forward it to our peer
+        // (RLY_DATA holds the host block tag, RLY_SYS_LO the per-tensix L1 dest, RLY_SIZE the payload).
+        bcast_to_peer(sys_lo, PHYS_RD32(slot + RLY_DATA), size, send_seq);
+    } else if (op == OP_DRAM_WRITE) {
+        // A sibling forwarded a DRAM-block write whose target we link-peer (RLY_DATA holds the host tag).
+        dram_write_to_peer(sys_lo, PHYS_RD32(slot + RLY_SYS_HI), PHYS_RD32(slot + RLY_DATA), size, send_seq);
+    } else if (op == OP_DRAM_READ) {
+        dram_read_to_host(sys_lo, PHYS_RD32(slot + RLY_SYS_HI), PHYS_RD32(slot + RLY_DATA), size, send_seq);
+    } else {
+        if (op == OP_BLOCK_WRITE) {
+            noc_get(ingress, ingress_block, BLOCK_BUF_ADDR, round16(size)); // fetch the block to ship
         }
-        uint32_t op = PHYS_RD32(slot + RLY_OP);
-        uint32_t size = PHYS_RD32(slot + RLY_SIZE);
-        uint32_t ingress = PHYS_RD32(slot + RLY_INGRESS);
-        uint32_t ingress_block = PHYS_RD32(slot + RLY_BLOCK);
-        uint32_t reply = 0;
-        if (op == OP_BROADCAST) {
-            // A sibling forwarded a broadcast whose target remote we link-peer: forward it to our peer
-            // (RLY_DATA holds the host block tag, RLY_SYS_LO the per-tensix L1 dest, RLY_SIZE the payload).
-            bcast_to_peer(PHYS_RD32(slot + RLY_SYS_LO), PHYS_RD32(slot + RLY_DATA), size, send_seq);
-        } else if (op == OP_DRAM_WRITE) {
-            // A sibling forwarded a DRAM-block write whose target we link-peer (RLY_DATA holds the host tag).
-            dram_write_to_peer(PHYS_RD32(slot + RLY_SYS_LO), PHYS_RD32(slot + RLY_SYS_HI), PHYS_RD32(slot + RLY_DATA), size, send_seq);
-        } else if (op == OP_DRAM_READ) {
-            dram_read_to_host(PHYS_RD32(slot + RLY_SYS_LO), PHYS_RD32(slot + RLY_SYS_HI), PHYS_RD32(slot + RLY_DATA), size, send_seq);
-        } else {
-            if (op == OP_BLOCK_WRITE) {
-                noc_get(ingress, ingress_block, BLOCK_BUF_ADDR, round16(size)); // fetch the block to ship
-            }
-            reply = single_hop(op, PHYS_RD32(slot + RLY_SYS_LO), PHYS_RD32(slot + RLY_SYS_HI), size,
-                               PHYS_RD32(slot + RLY_DATA), BLOCK_BUF_ADDR, send_seq);
-            if (op == OP_BLOCK_READ) {
-                noc_put(ingress, ingress_block, BLOCK_BUF_ADDR, round16(size)); // deposit into ingress's relay buffer
-            }
+        reply = single_hop(op, sys_lo, PHYS_RD32(slot + RLY_SYS_HI), size, PHYS_RD32(slot + RLY_DATA),
+                           BLOCK_BUF_ADDR, send_seq);
+        if (op == OP_BLOCK_READ) { // deposit into ingress's relay buffer, at the same target alignment
+            noc_put(ingress, ingress_block + (sys_lo & 63u), BLOCK_BUF_ADDR + (sys_lo & 63u), size);
         }
-        PHYS_WR32(RELAY_LAST_SEQ_BASE + 4 * i, seq);
-        PHYS_WR32(OUTBOX_ADDR + 0, seq);
-        PHYS_WR32(OUTBOX_ADDR + 4, reply);
-        noc_put(ingress, RELAY_RESP_ADDR, OUTBOX_ADDR, 8);
     }
+    PHYS_WR32(RELAY_LAST_SEQ_BASE + 4 * i, seq);
+    PHYS_WR32(OUTBOX_ADDR + 0, seq);
+    PHYS_WR32(OUTBOX_ADDR + 4, reply);
+    noc_put(ingress, RELAY_RESP_ADDR, OUTBOX_ADDR, 8);
 }
 
-// Receiver role: if the peer forwarded a new request, perform the local NOC access and reply.
-static void service_inbox(uint32_t *last_seq) {
+// Receiver role: the peer forwarded a new request; perform the local NOC access and reply.
+static __attribute__((noinline)) void service_inbox(void) {
     uint32_t seq = PHYS_RD32(REQ_INBOX_ADDR + PKT_SEQ);
-    if (seq == *last_seq) {
-        return;
-    }
     uint32_t op = PHYS_RD32(REQ_INBOX_ADDR + PKT_OP);
     uint32_t addr_lo = PHYS_RD32(REQ_INBOX_ADDR + PKT_ADDR_LO);
     uint32_t addr_mid = PHYS_RD32(REQ_INBOX_ADDR + PKT_ADDR_MID);
@@ -510,9 +535,7 @@ static void service_inbox(uint32_t *last_seq) {
         reply_data = PHYS_RD32(NOC_STAGE_ADDR + off);
         reply_op = OP_RESP;
     } else if (op == OP_BLOCK_WRITE) {
-        // The block preceded this header at BLOCK_BUF; realign it and NOC-write it to the target.
-        l1_copy(NOC_BLOCK_STAGE_ADDR + off, BLOCK_BUF_ADDR, size);
-        noc_write(addr_lo, addr_mid, NOC_BLOCK_STAGE_ADDR + off, size);
+        noc_write(addr_lo, addr_mid, BLOCK_BUF_ADDR + (addr_lo & 15u), size); // the block preceded this header
     } else if (op == OP_BLOCK_READ) {
         // NOC-read the block, then send it back ahead of the response header. Reads from an MMIO
         // target (e.g. ARC/eth regs) are capped at 4 bytes per NOC transaction, so chunk them.
@@ -520,18 +543,15 @@ static void service_inbox(uint32_t *last_seq) {
         uint32_t chunk_max = mmio ? 4u : ETH_BLOCK_CHUNK;
         for (uint32_t done = 0; done < size; done += chunk_max) {
             uint32_t chunk = size - done < chunk_max ? size - done : chunk_max;
-            noc_read(addr_lo + done, addr_mid, NOC_BLOCK_STAGE_ADDR + off + done, chunk);
+            noc_read(addr_lo + done, addr_mid, BLOCK_BUF_ADDR + off + done, chunk);
         }
-        l1_copy(BLOCK_BUF_ADDR, NOC_BLOCK_STAGE_ADDR + off, size);
-        eth_send(BLOCK_BUF_ADDR, BLOCK_BUF_ADDR, round16(size));
+        eth_send(BLOCK_BUF_ADDR, BLOCK_BUF_ADDR, round16(off + size));
         reply_op = OP_BLOCK_RESP;
     } else if (op == OP_BROADCAST) {
-        // The block preceded this header at BCAST_READ; realign it before the local multicast.
-        uint32_t stage = NOC_BLOCK_STAGE_ADDR + (addr_lo & 15u);
-        l1_copy(stage, BCAST_READ_ADDR, size);
-        noc_multicast(addr_lo, TENSIX_GRID_START, TENSIX_GRID_END, stage, size);
+        // The block preceded this header at BCAST_READ.
+        noc_multicast(addr_lo, TENSIX_GRID_START, TENSIX_GRID_END, realign16(BCAST_READ_ADDR, addr_lo, size), size);
     }
-    *last_seq = seq;
+    PHYS_WR32(LAST_RECV_SEQ_ADDR, seq);
     PHYS_WR32(OUTBOX_ADDR + PKT_SEQ, seq);
     PHYS_WR32(OUTBOX_ADDR + PKT_OP, reply_op);
     PHYS_WR32(OUTBOX_ADDR + PKT_DATA, reply_data);
@@ -539,7 +559,7 @@ static void service_inbox(uint32_t *last_seq) {
 }
 
 // Finish a single/L1-block command: signal write completion or fill the host response queue. `block_src`
-// is where a block-read result landed -- BLOCK_BUF for a direct hop, RELAY_RESP_BLOCK_ADDR for a relay.
+// is where a block-read result landed -- in BLOCK_BUF for a direct hop, RELAY_RESP_BLOCK_ADDR for a relay.
 static void complete_single(uint32_t is_read, uint32_t is_block, uint32_t size, uint32_t reply, uint32_t block_src) {
     if (!is_read) {
         uint32_t wr_req = PHYS_RD32(REQ_QUEUE_BASE + 0);
@@ -565,7 +585,10 @@ static void complete_single(uint32_t is_read, uint32_t is_block, uint32_t size, 
 // DRAM-block reads/writes, plus broadcast. A command that must be relayed through a sibling egress core
 // is non-blocking: it is posted once and this function returns, resuming from the same queue slot on a
 // later tick once the reply arrives, so the egress/receiver roles keep running in between.
-static void service_request_queue(uint32_t *send_seq) {
+static __attribute__((noinline)) void service_request_queue(uint32_t *send_seq) {
+    if (PHYS_RD32(RELAY_WAIT_ADDR) && PHYS_RD32(RELAY_RESP_ADDR) != PHYS_RD32(RELAY_SEND_SEQ_ADDR)) {
+        return; // the relay posted for the head command hasn't replied; skip re-decoding and routing it
+    }
     uint32_t wrptr = PHYS_RD32(REQ_WRPTR) & CMD_BUF_PTR_MASK;
     while ((PHYS_RD32(REQ_RDPTR) & CMD_BUF_PTR_MASK) != wrptr) {
         uint32_t rdptr = PHYS_RD32(REQ_RDPTR) & CMD_BUF_PTR_MASK;
@@ -576,9 +599,12 @@ static void service_request_queue(uint32_t *send_seq) {
         uint32_t data = PHYS_RD32(cmd_addr + 8);
         uint32_t flags = PHYS_RD32(cmd_addr + 12) & ~CMD_ORDERED; // ORDERED is a no-op for us; match the rest
         uint32_t tc = (sys_hi >> 16) & 0xFFF;
-        uint32_t tc_egress_route = route_egress(tc);
-        if (!(flags & CMD_BROADCAST) && tc_egress_route == 0xFFFFFFFF) {
-            sim_error(ETH_ERR_UNROUTABLE);
+        uint32_t tc_egress_route = 0; // the egress is only needed to post a relay (a waiting one was checked then)
+        if (!(flags & CMD_BROADCAST) && tc != route_my_peer() && !PHYS_RD32(RELAY_WAIT_ADDR)) {
+            tc_egress_route = route_egress(tc);
+            if (tc_egress_route == 0xFFFFFFFF) {
+                sim_error(ETH_ERR_UNROUTABLE);
+            }
         }
         if (flags == CMD_WR_REQ || flags == CMD_RD_REQ ||
             flags == (CMD_WR_REQ | CMD_DATA_BLOCK) || flags == (CMD_RD_REQ | CMD_DATA_BLOCK)) {
@@ -589,18 +615,17 @@ static void service_request_queue(uint32_t *send_seq) {
             if (tc == route_my_peer()) { // I link-peer the target: do the single eth hop (blocking on my peer)
                 uint32_t block_buf = ETH_ROUTING_DATA_BUFFER_ADDR + cmd_id * MAX_L1_BLOCK_SIZE;
                 uint32_t reply = single_hop(op, sys_lo, sys_hi, size, data, block_buf, send_seq);
-                complete_single(is_read, is_block, size, reply, BLOCK_BUF_ADDR);
+                complete_single(is_read, is_block, size, reply, BLOCK_BUF_ADDR + (sys_lo & 63u));
             } else if (!PHYS_RD32(RELAY_WAIT_ADDR)) { // forward to the sibling egress; collect the reply later
                 uint32_t ingress_block = is_read ? RELAY_RESP_BLOCK_ADDR
                                                  : ETH_ROUTING_DATA_BUFFER_ADDR + cmd_id * MAX_L1_BLOCK_SIZE;
                 relay_post(tc_egress_route, op, sys_lo, sys_hi, size, data, ingress_block);
                 PHYS_WR32(RELAY_WAIT_ADDR, 1);
                 return; // yield so the egress/receiver roles run; resume this slot on a later tick
-            } else if (PHYS_RD32(RELAY_RESP_ADDR) != PHYS_RD32(RELAY_SEND_SEQ_ADDR)) {
-                return; // the egress hasn't replied yet; keep yielding
             } else { // reply is in: RELAY_RESP holds the read word, a block read landed in RELAY_RESP_BLOCK
                 PHYS_WR32(RELAY_WAIT_ADDR, 0);
-                complete_single(is_read, is_block, size, PHYS_RD32(RELAY_RESP_ADDR + 4), RELAY_RESP_BLOCK_ADDR);
+                complete_single(is_read, is_block, size, PHYS_RD32(RELAY_RESP_ADDR + 4),
+                                RELAY_RESP_BLOCK_ADDR + (sys_lo & 63u));
             }
         } else if (flags == (CMD_WR_REQ | CMD_DATA_BLOCK | CMD_DATA_BLOCK_DRAM)) {
             // DRAM-source block write: stream the host-window block to the target's DRAM, directly if this
@@ -615,8 +640,6 @@ static void service_request_queue(uint32_t *send_seq) {
                     relay_post(tc_egress_route, OP_DRAM_WRITE, sys_lo, sys_hi, size, tag, 0);
                     PHYS_WR32(RELAY_WAIT_ADDR, 1);
                     return; // yield so the egress/receiver roles run; resume this slot on a later tick
-                } else if (PHYS_RD32(RELAY_RESP_ADDR) != PHYS_RD32(RELAY_SEND_SEQ_ADDR)) {
-                    return; // the egress hasn't finished the transfer yet; keep yielding
                 }
                 PHYS_WR32(RELAY_WAIT_ADDR, 0);
             } else {
@@ -635,8 +658,6 @@ static void service_request_queue(uint32_t *send_seq) {
                     relay_post(tc_egress_route, OP_DRAM_READ, sys_lo, sys_hi, size, tag, 0);
                     PHYS_WR32(RELAY_WAIT_ADDR, 1);
                     return; // yield so the egress/receiver roles run; resume this slot on a later tick
-                } else if (PHYS_RD32(RELAY_RESP_ADDR) != PHYS_RD32(RELAY_SEND_SEQ_ADDR)) {
-                    return; // the egress hasn't finished the transfer yet; keep yielding
                 }
                 PHYS_WR32(RELAY_WAIT_ADDR, 0);
             } else {
@@ -677,17 +698,28 @@ static void service_request_queue(uint32_t *send_seq) {
 // Drain the remote-routing queue and service the link inbox. Called both from the main loop and,
 // crucially, from the active-erisc app's cooperative yield (eth_yield_entry) so routing continues
 // while metal's app holds the core. State lives in L1 so it survives across those two call sites.
-// Non-static: referenced by the crt0 yield shim.
+// Each role runs out of line and only when it has work, keeping the poll short: every remote command's
+// reply waits on it. Non-static: referenced by the crt0 yield shim.
 void eth_service(void) {
     if (!routing_enabled()) {
         return;
     }
     uint32_t send_seq = PHYS_RD32(SEND_SEQ_ADDR);
-    service_request_queue(&send_seq); // ingress: my host queue (single-hop, or relay to a sibling egress)
-    uint32_t last_recv_seq = PHYS_RD32(LAST_RECV_SEQ_ADDR);
-    service_inbox(&last_recv_seq); // receiver: a peer forwarded a request to me
-    PHYS_WR32(LAST_RECV_SEQ_ADDR, last_recv_seq);
-    service_relay(&send_seq); // egress: a sibling forwarded a relay to me; do its single hop
+    if ((PHYS_RD32(REQ_RDPTR) ^ PHYS_RD32(REQ_WRPTR)) & CMD_BUF_PTR_MASK) {
+        service_request_queue(&send_seq); // ingress: my host queue (single-hop, or relay to a sibling egress)
+    }
+    if (PHYS_RD32(REQ_INBOX_ADDR + PKT_SEQ) != PHYS_RD32(LAST_RECV_SEQ_ADDR)) {
+        service_inbox(); // receiver: a peer forwarded a request to me
+    }
+    if (PHYS_RD32(RELAY_DOORBELL_ADDR)) {
+        PHYS_WR32(RELAY_DOORBELL_ADDR, 0); // before the scan, so a post landing during it rings again
+        uint32_t n = PHYS_RD32(ROUTE_TABLE_ADDR);
+        for (uint32_t i = 0; i < n; i++) {
+            if (PHYS_RD32(RELAY_REQ_BASE + i * RELAY_SLOT_SIZE + PKT_SEQ) != PHYS_RD32(RELAY_LAST_SEQ_BASE + 4 * i)) {
+                service_relay(i, &send_seq); // egress: a sibling forwarded a relay to me; do its single hop
+            }
+        }
+    }
     PHYS_WR32(SEND_SEQ_ADDR, send_seq);
 }
 
@@ -764,6 +796,7 @@ void eth_fw_main(void) {
     // Route the app's periodic yield through the base fw's routing service.
     PHYS_WR32(ETH_APP_YIELD_PTR_ADDR, (uint32_t)&eth_yield_entry);
 
+    route_cache_init();
     noc_init();
 
     for (;;) {

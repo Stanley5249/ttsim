@@ -12,29 +12,29 @@ WH_ETH_FW_STACK_TOP = 0x18000
 BH_ETH_FW_LOAD_ADDR = 0x76000
 BH_ETH_FW_STACK_TOP = 0x7CC00
 
-# (output stem, sources, load address, stack top) per architecture.
+# (output stem, -mcpu, sources, load address, stack top) per architecture.
 IMAGES = [
-    ('eth_fw', ['crt0.S', 'eth_fw.c'], WH_ETH_FW_LOAD_ADDR, WH_ETH_FW_STACK_TOP),
-    ('bh_eth_fw', ['bh_crt0.S', 'bh_eth_fw.c'], BH_ETH_FW_LOAD_ADDR, BH_ETH_FW_STACK_TOP),
+    ('eth_fw', 'tt-wh', ['crt0.S', 'eth_fw.c'], WH_ETH_FW_LOAD_ADDR, WH_ETH_FW_STACK_TOP),
+    ('bh_eth_fw', 'tt-bh', ['bh_crt0.S', 'bh_eth_fw.c'], BH_ETH_FW_LOAD_ADDR, BH_ETH_FW_STACK_TOP),
 ]
 
 # The absolute-address MMIO writes in the fw trip -Warray-bounds, so suppress it.
 CC_OPTS = [
-    '-march=rv32im', '-mabi=ilp32', '-nostdlib', '-nostartfiles', '-ffreestanding',
+    '-nostdlib', '-nostartfiles', '-ffreestanding',
     '-fno-pic', '-Os', '-Wall', '-Wextra', '-Werror', '-Wno-array-bounds',
 ]
 
 def rules(ctx):
     assert ctx.host.os == 'linux', 'eth fw can only be built on Linux (the SFPI cross compiler is Linux-only)'
 
-    sfpi_path = ctx.env.get('SFPI_PATH', ctx.path.expanduser('~/sfpi-7.3.0'))
+    sfpi_path = ctx.env.get('SFPI_PATH', ctx.path.expanduser('~/sfpi-7.89.0'))
     sfpi_gcc = f'{sfpi_path}/compiler/bin/riscv-tt-elf-gcc'
     sfpi_objcopy = f'{sfpi_path}/compiler/bin/riscv-tt-elf-objcopy'
 
     binaries = []
-    for (stem, srcs, load_addr, stack_top) in IMAGES:
+    for (stem, mcpu, srcs, load_addr, stack_top) in IMAGES:
         elf = f'_out/{stem}.elf'
-        cmd = [sfpi_gcc, *CC_OPTS, '-T', 'eth_fw.ld',
+        cmd = [sfpi_gcc, f'-mcpu={mcpu}', *CC_OPTS, '-T', 'eth_fw.ld',
                f'-Wl,--defsym=ETH_FW_LOAD_ADDR=0x{load_addr:X}',
                f'-Wl,--defsym=ETH_FW_STACK_TOP=0x{stack_top:X}',
                *srcs, '-o', elf]

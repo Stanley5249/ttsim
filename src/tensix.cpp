@@ -76,11 +76,29 @@ static void replay_expander(TensixState *p_tensix, uint32_t pipe, uint32_t inst)
         uint32_t load_mode = bits<0,0>(inst);
         uint32_t execute_while_loading = bits<1,1>(inst);
         if (!load_mode) {
-            TTSIM_VERIFY(!execute_while_loading, UnimplementedFunctionality, "execute_while_loading=%d with load_mode=%d", execute_while_loading, load_mode);
+            TTSIM_VERIFY(!execute_while_loading, NonContractualBehavior, "execute_while_loading=%d ignored without load_mode", execute_while_loading);
         }
         uint32_t len = bits<13,4>(inst);
         uint32_t start_idx = bits<23,14>(inst);
-        TTSIM_VERIFY(len && (start_idx + len <= REPLAY_BUF_ENTRIES), UndefinedBehavior, "start_idx=%d len=%d", start_idx, len);
+#if TT_ARCH_VERSION == 0
+        TTSIM_VERIFY(len, NonContractualBehavior, "len=%d (32 entries)", len);
+#elif TT_ARCH_VERSION == 1
+        // Recording Count 0 without Exec can stop RISCV T's pushes for good: its retire tracking then expects none of the
+        // 64 recorded
+        TTSIM_VERIFY(len || !load_mode || execute_while_loading, UndefinedBehavior, "len=%d", len);
+        TTSIM_VERIFY(len, NonContractualBehavior, "len=%d (64 entries)", len);
+#else
+        TTSIM_VERIFY(len, UndefinedBehavior, "len=%d", len);
+#endif
+#if TT_ARCH_VERSION == 0
+        // The count left is 5 bits: Count 33..63 runs Count - 32 entries, but a replay of 33 runs 33 or 1 by timing
+        TTSIM_VERIFY(load_mode || (len != 33), UndefinedBehavior, "start_idx=%d len=%d", start_idx, len);
+        TTSIM_VERIFY(start_idx + len <= REPLAY_BUF_ENTRIES, NonContractualBehavior, "start_idx=%d len=%d", start_idx, len);
+#elif TT_ARCH_VERSION == 1
+        TTSIM_VERIFY(start_idx + len <= REPLAY_BUF_ENTRIES, NonContractualBehavior, "start_idx=%d len=%d wraps", start_idx, len);
+#else
+        TTSIM_VERIFY(start_idx + len <= REPLAY_BUF_ENTRIES, UndefinedBehavior, "start_idx=%d len=%d", start_idx, len);
+#endif
 
         uint32_t base = 0;
         if (load_mode) {
@@ -88,9 +106,9 @@ static void replay_expander(TensixState *p_tensix, uint32_t pipe, uint32_t inst)
             p_tensix->replay_left[pipe] = len;
             p_tensix->replay_execute_while_loading[pipe] = execute_while_loading;
         } else {
-            for (uint32_t i = 0; i < len; i++) {
-                tensix_push_inst_fifo(p_tensix, pipe, p_tensix->replay_buf[pipe][base + start_idx + i]);
-            }
+            // Emitted by tensix_frontend_step as the FIFO has room
+            p_tensix->replay_play_index[pipe] = base + start_idx;
+            p_tensix->replay_play_left[pipe] = len;
         }
     } else {
         tensix_push_inst_fifo(p_tensix, pipe, inst);
@@ -102,95 +120,171 @@ static void mop_cfg(TensixState *p_tensix, uint32_t pipe, uint32_t inst) {
     p_tensix->mop_zmask_hi16[pipe] = bits<15,0>(inst);
 }
 
-static void mop_expander(TensixState *p_tensix, uint32_t pipe, uint32_t inst) {
+// The MOP configuration is sampled when the MOP is ingested, and the expanders emit one instruction at a time as the
+// instruction FIFO has room, so a thread's pushes stall while its expanders are busy
+static void mop_ingest(TensixState *p_tensix, uint32_t pipe, uint32_t inst) {
     uint32_t zlo = bits<15,0>(inst);
     uint32_t loop_count = bits<22,16>(inst);
     uint32_t mop_type = bits<23,23>(inst);
+    const uint32_t *cfg = p_tensix->mop_cfg[pipe];
     if (!mop_type) {
         TTSIM_VERIFY(loop_count <= 31, UnsupportedFunctionality, "loop_count=%d (mop_type=%d)", loop_count, mop_type);
-        uint32_t zmask = zlo | (uint32_t(p_tensix->mop_zmask_hi16[pipe]) << 16);
-        uint32_t flags = p_tensix->mop_cfg[pipe][1];
-        TTSIM_VERIFY(flags <= 3, UnsupportedFunctionality, "flags=0x%x", flags);
-        for (uint32_t i = 0; i <= loop_count; i++) {
-            if (zmask & 1) {
-                replay_expander(p_tensix, pipe, p_tensix->mop_cfg[pipe][7]);
-                if (flags & 1) {
-                    replay_expander(p_tensix, pipe, p_tensix->mop_cfg[pipe][8]);
-                }
-            } else {
-                replay_expander(p_tensix, pipe, p_tensix->mop_cfg[pipe][3]);
-                if (flags & 2) {
-                    replay_expander(p_tensix, pipe, p_tensix->mop_cfg[pipe][4]);
-                    replay_expander(p_tensix, pipe, p_tensix->mop_cfg[pipe][5]);
-                    replay_expander(p_tensix, pipe, p_tensix->mop_cfg[pipe][6]);
-                }
-                if (flags & 1) {
-                    replay_expander(p_tensix, pipe, p_tensix->mop_cfg[pipe][2]);
-                }
-            }
-            zmask >>= 1;
-        }
-        return;
-    }
-
-    TTSIM_VERIFY(!zlo, UnimplementedFunctionality, "zlo=%d (mop_type=%d)", zlo, mop_type);
-    TTSIM_VERIFY(!loop_count, UnimplementedFunctionality, "loop_count=%d (mop_type=%d)", loop_count, mop_type);
-    uint32_t outer_loop_len = p_tensix->mop_cfg[pipe][0];
-    TTSIM_VERIFY((outer_loop_len >= 1) && (outer_loop_len <= 32), UnimplementedFunctionality, "outer_loop_len=%d", outer_loop_len);
-    uint32_t inner_loop_len = p_tensix->mop_cfg[pipe][1];
-#if TT_ARCH_VERSION >= 1
-    TTSIM_VERIFY((inner_loop_len >= 1) && (inner_loop_len <= 128), UnimplementedFunctionality, "inner_loop_len=%d", inner_loop_len);
+        TTSIM_VERIFY(cfg[1] <= 3, UnsupportedFunctionality, "flags=0x%x", cfg[1]);
+    } else {
+        TTSIM_VERIFY(!zlo, UnimplementedFunctionality, "zlo=%d (mop_type=%d)", zlo, mop_type);
+        TTSIM_VERIFY(!loop_count, UnimplementedFunctionality, "loop_count=%d (mop_type=%d)", loop_count, mop_type);
+#if TT_ARCH_VERSION == 1
+        // The counts are 10 bits
+        TTSIM_VERIFY((cfg[0] | cfg[1]) <= 0x3FF, NonContractualBehavior, "outer_loop_len=%d inner_loop_len=%d", cfg[0], cfg[1]);
+        // A MOP that expands to nothing never retires (RISCV T's retire tracking retires it when its last instruction issues)
+        TTSIM_VERIFY(cfg[0] && (cfg[1] || !IS_TENSIX_NOP(cfg[2]) || !IS_TENSIX_NOP(cfg[3])), UndefinedBehavior,
+            "outer_loop_len=%d inner_loop_len=%d", cfg[0], cfg[1]);
+        TTSIM_VERIFY(cfg[1], UnimplementedFunctionality, "outer_loop_len=%d inner_loop_len=%d", cfg[0], cfg[1]);
 #else
-    TTSIM_VERIFY((inner_loop_len >= 1) && (inner_loop_len <= 127), UnsupportedFunctionality, "inner_loop_len=%d", inner_loop_len);
+        TTSIM_VERIFY((cfg[0] >= 1) && (cfg[0] <= 32), UnimplementedFunctionality, "outer_loop_len=%d", cfg[0]);
+        TTSIM_VERIFY((cfg[1] >= 1) && (cfg[1] <= 127), UnsupportedFunctionality, "inner_loop_len=%d", cfg[1]);
 #endif
-    uint32_t start_op = p_tensix->mop_cfg[pipe][2];
-    uint32_t end_op0 = p_tensix->mop_cfg[pipe][3];
-    uint32_t end_op1 = p_tensix->mop_cfg[pipe][4];
-    uint32_t loop_op = p_tensix->mop_cfg[pipe][5];
-    uint32_t loop_op1 = p_tensix->mop_cfg[pipe][6];
-    uint32_t loop0_last_instr = p_tensix->mop_cfg[pipe][7];
-    uint32_t loop1_last_instr = p_tensix->mop_cfg[pipe][8];
+    }
+    TensixMopState *p_mop = &p_tensix->mop[pipe];
+    p_mop->busy = true;
+    p_mop->inst = inst;
+    p_mop->zmask = zlo | (uint32_t(p_tensix->mop_zmask_hi16[pipe]) << 16);
+    std::copy(cfg, cfg + 9, p_mop->cfg);
+    p_mop->iter = 0;
+    p_mop->step = 0;
+}
 
+enum MopStep { MOP_STEP_END, MOP_STEP_EMIT, MOP_STEP_SKIP };
+
+// What step `step` of iteration `iter` of the MOP being expanded does: emit *p_inst, emit nothing, or (past the last
+// step) end the iteration
+static MopStep mop_step_inst(const TensixMopState *p_mop, uint32_t iter, uint32_t step, uint32_t *p_inst) {
+    const uint32_t *cfg = p_mop->cfg;
+    if (!bits<23,23>(p_mop->inst)) {
+        uint32_t flags = cfg[1];
+        if ((p_mop->zmask >> iter) & 1) {
+            // emits cfg[7], then cfg[8] if flags bit 0
+            static const uint8_t seq[2] = {7, 8};
+            if (step >= 1 + (flags & 1)) {
+                return MOP_STEP_END;
+            }
+            *p_inst = cfg[seq[step]];
+        } else {
+            // emits cfg[3], then cfg[4..6] if flags bit 1, then cfg[2] if flags bit 0
+            uint32_t n = 1 + ((flags & 2) ? 3 : 0) + (flags & 1);
+            if (step >= n) {
+                return MOP_STEP_END;
+            }
+            *p_inst = (step == 0) ? cfg[3] : ((flags & 2) && (step <= 3)) ? cfg[3 + step] : cfg[2];
+        }
+        return MOP_STEP_EMIT;
+    }
+    uint32_t outer_loop_len = cfg[0];
+    uint32_t start_op = cfg[2];
+    uint32_t end_op0 = cfg[3];
+    uint32_t end_op1 = cfg[4];
+    uint32_t loop_op = cfg[5];
+    uint32_t loop_op1 = cfg[6];
+    uint32_t inner_loop_len = cfg[1];
     uint32_t loop_op_flip = 0;
     if (!IS_TENSIX_NOP(loop_op1)) {
         loop_op_flip = loop_op ^ loop_op1;
         inner_loop_len *= 2;
     }
+    // step 0: start_op; steps 1..inner_loop_len: the inner loop; then end_op0 and end_op1. NOP start and end ops
+    // are skipped, and end_op1 is used only with end_op0.
+    if (step == 0) {
+        *p_inst = start_op;
+        return IS_TENSIX_NOP(start_op) ? MOP_STEP_SKIP : MOP_STEP_EMIT;
+    } else if (step <= inner_loop_len) {
+        uint32_t j = step - 1;
+        if (j + 1 < inner_loop_len) {
+            *p_inst = loop_op ^ ((j & 1) ? loop_op_flip : 0);
+        } else if (iter + 1 < outer_loop_len) {
+            *p_inst = cfg[8]; // loop1_last_instr
+        } else {
+            *p_inst = cfg[7]; // loop0_last_instr
+        }
+    } else if (step == inner_loop_len + 1) {
+        *p_inst = end_op0;
+        return IS_TENSIX_NOP(end_op0) ? MOP_STEP_SKIP : MOP_STEP_EMIT;
+    } else if (step == inner_loop_len + 2) {
+        *p_inst = end_op1;
+        return (IS_TENSIX_NOP(end_op0) || IS_TENSIX_NOP(end_op1)) ? MOP_STEP_SKIP : MOP_STEP_EMIT;
+    } else {
+        return MOP_STEP_END;
+    }
+    return MOP_STEP_EMIT;
+}
 
-    for (uint32_t i = 0; i < outer_loop_len; i++) {
-        if (!IS_TENSIX_NOP(start_op)) {
-            replay_expander(p_tensix, pipe, start_op);
+// Next instruction the MOP expander emits; false once the expansion is complete
+static bool mop_next(TensixState *p_tensix, uint32_t pipe, uint32_t *p_inst) {
+    TensixMopState *p_mop = &p_tensix->mop[pipe];
+    uint32_t iters = bits<23,23>(p_mop->inst) ? p_mop->cfg[0] : bits<22,16>(p_mop->inst) + 1;
+    while (p_mop->iter < iters) {
+        MopStep step = mop_step_inst(p_mop, p_mop->iter, p_mop->step, p_inst);
+        if (step == MOP_STEP_END) {
+            p_mop->iter++;
+            p_mop->step = 0;
+            continue;
         }
-        for (uint32_t j = 0; j < inner_loop_len; j++) {
-            if (j + 1 < inner_loop_len) {
-                replay_expander(p_tensix, pipe, loop_op);
-            } else if (i + 1 < outer_loop_len) {
-                replay_expander(p_tensix, pipe, loop1_last_instr);
-            } else {
-                replay_expander(p_tensix, pipe, loop0_last_instr);
-            }
-            loop_op ^= loop_op_flip;
+        p_mop->step++;
+        if (step == MOP_STEP_EMIT) {
+            return true;
         }
-        if (!IS_TENSIX_NOP(end_op0)) {
-            replay_expander(p_tensix, pipe, end_op0);
-            if (!IS_TENSIX_NOP(end_op1)) {
-                replay_expander(p_tensix, pipe, end_op1);
-            }
+    }
+    p_mop->busy = false;
+    return false;
+}
+
+static uint32_t inst_fifo_used(const TensixState *p_tensix, uint32_t pipe) {
+    return (p_tensix->inst_wr_ptr[pipe] + TENSIX_INST_FIFO_SIZE - p_tensix->inst_rd_ptr[pipe]) % TENSIX_INST_FIFO_SIZE;
+}
+
+static inline bool tensix_expanding(const TensixState *p_tensix, uint32_t pipe) {
+    return p_tensix->mop[pipe].busy || p_tensix->replay_play_left[pipe];
+}
+
+// Moves instructions out of the MOP and Replay Expanders into the instruction FIFO while it has room
+void tensix_frontend_step(TensixState *p_tensix, uint32_t pipe) {
+    while (inst_fifo_used(p_tensix, pipe) < TENSIX_INST_FIFO_SIZE - 1) { // the FIFO keeps one entry empty
+        if (p_tensix->replay_play_left[pipe]) {
+            tensix_push_inst_fifo(p_tensix, pipe, p_tensix->replay_buf[pipe][p_tensix->replay_play_index[pipe]]);
+            p_tensix->replay_play_index[pipe]++;
+            p_tensix->replay_play_left[pipe]--;
+            continue;
         }
+        uint32_t inst;
+        if (!p_tensix->mop[pipe].busy || !mop_next(p_tensix, pipe, &inst)) {
+            break;
+        }
+        replay_expander(p_tensix, pipe, inst);
+    }
+    if (tensix_expanding(p_tensix, pipe)) {
+        p_tensix->expand_pipes_active |= 1 << pipe;
+        ttsim_t_tile_set_busy(p_tensix->tile_id);
+    } else {
+        p_tensix->expand_pipes_active &= ~(1 << pipe);
     }
 }
 
 // Whether every instruction this thread has pushed has finished executing
 bool tensix_thread_idle(const TensixState *p_tensix, uint32_t pipe) {
+    if (tensix_expanding(p_tensix, pipe)) {
+        return false;
+    }
     return p_tensix->inst_rd_ptr[pipe] == p_tensix->inst_wr_ptr[pipe];
 }
 
 // Whether the thread's MOP Expander has finished expanding
 bool tensix_mop_expander_idle(const TensixState *p_tensix, uint32_t pipe) {
-    return true; // a MOP is expanded the moment it arrives
+    return !p_tensix->mop[pipe].busy;
 }
 
 bool tensix_can_push_inst(TensixState *p_tensix, uint32_t pipe) {
+    if (tensix_expanding(p_tensix, pipe)) {
+        return false; // a thread's pushes stall while its expanders are busy
+    }
     int32_t fifo_size = p_tensix->inst_wr_ptr[pipe] - p_tensix->inst_rd_ptr[pipe];
     if (fifo_size < 0) {
         fifo_size += TENSIX_INST_FIFO_SIZE;
@@ -201,14 +295,16 @@ bool tensix_can_push_inst(TensixState *p_tensix, uint32_t pipe) {
 void tensix_push_inst(TensixState *p_tensix, uint32_t pipe, uint32_t inst, bool bypass_mop_expander) {
     if (bypass_mop_expander) {
         replay_expander(p_tensix, pipe, inst);
+        tensix_frontend_step(p_tensix, pipe);
         return;
     }
     uint32_t opcode = bits<31,24>(inst);
     switch (opcode) {
-        case TENSIX_OPCODE_MOP: mop_expander(p_tensix, pipe, inst); break;
+        case TENSIX_OPCODE_MOP: mop_ingest(p_tensix, pipe, inst); break;
         case TENSIX_OPCODE_MOP_CFG: mop_cfg(p_tensix, pipe, inst); break;
         default: replay_expander(p_tensix, pipe, inst); break; // everything else is just passthrough
     }
+    tensix_frontend_step(p_tensix, pipe);
 }
 
 static inline uint32_t step_prng(uint32_t state) {
@@ -217,7 +313,7 @@ static inline uint32_t step_prng(uint32_t state) {
 }
 
 static void seed_prng(TensixState *p_tensix, uint32_t seed) {
-    for (uint32_t i = 0; i < 32; i++) {
+    for (uint32_t i = 0; i < 32 + TT_ARCH_VERSION; i++) { // Blackhole's seeder steps once more than Wormhole's
         seed = step_prng(seed);
     }
     for (uint32_t i = 0; i < 32; i++) {
@@ -641,6 +737,40 @@ static void math_update_counters(TensixState *p_tensix, uint32_t pipe, uint32_t 
     }
 }
 
+// A move into a Src bank (MOVD2A, MOVD2B, MOVB2A) doesn't wait for the Matrix Unit to have the bank, and an unpacker
+// writing the same bank before handing it over races it. Until an instruction of the Matrix Unit's has waited for the
+// bank, a move is fine only while no unpacker write comes before the handover, earlier or later.
+static inline void math_src_waited(TensixState *p_tensix, bool is_src_b) {
+    p_tensix->src_waited[is_src_b] |= 1 << (is_src_b ? p_tensix->src_b_matrix_bank : p_tensix->src_a_matrix_bank);
+}
+
+static inline void math_src_released(TensixState *p_tensix, bool is_src_b, uint32_t bank) {
+    p_tensix->src_waited[is_src_b] &= ~(1 << bank);
+    for (uint32_t pipe = 0; pipe < TENSIX_INST_PIPES; pipe++) {
+        p_tensix->src_unpacked[is_src_b][pipe] &= ~(1 << bank);
+    }
+    p_tensix->src_moved[is_src_b] &= ~(1 << bank);
+}
+
+static inline void math_src_move(TensixState *p_tensix, bool is_src_b) {
+    uint32_t bank = is_src_b ? p_tensix->src_b_matrix_bank : p_tensix->src_a_matrix_bank;
+    if (!(p_tensix->src_waited[is_src_b] & (1 << bank))) {
+        uint32_t unpacked = 0;
+        for (uint32_t pipe = 0; pipe < TENSIX_INST_PIPES; pipe++) {
+            unpacked |= p_tensix->src_unpacked[is_src_b][pipe];
+        }
+        TTSIM_VERIFY(!(unpacked & (1 << bank)), UndefinedBehavior,
+            "move into Src%c bank %d before waiting for it, which an unpacker wrote", is_src_b ? 'B' : 'A', bank);
+        p_tensix->src_moved[is_src_b] |= 1 << bank;
+    }
+}
+
+static inline void unpack_src_written(TensixState *p_tensix, uint32_t pipe, bool is_src_b, uint32_t bank) {
+    TTSIM_VERIFY(!(p_tensix->src_moved[is_src_b] & (1 << bank)), UndefinedBehavior,
+        "unpack into Src%c bank %d, which a move wrote before the Matrix Unit waited for it", is_src_b ? 'B' : 'A', bank);
+    p_tensix->src_unpacked[is_src_b][pipe] |= 1 << bank;
+}
+
 static void math_clear_src_valid(TensixState *p_tensix, uint32_t pipe, uint32_t clear_dvalid) {
     if (clear_dvalid & 1) {
         bool clear_a = !p_tensix->thread[pipe].CLR_DVALID_SrcA_Disable;
@@ -648,6 +778,7 @@ static void math_clear_src_valid(TensixState *p_tensix, uint32_t pipe, uint32_t 
             TTSIM_VERIFY(p_tensix->src_a_valid & (1 << p_tensix->src_a_matrix_bank), NonContractualBehavior, "SrcA bank is not valid");
             p_tensix->src_a_valid &= ~(1 << p_tensix->src_a_matrix_bank);
         }
+        math_src_released(p_tensix, false, p_tensix->src_a_matrix_bank);
         p_tensix->src_a_matrix_bank ^= 1;
     }
     if (clear_dvalid & 2) {
@@ -656,6 +787,7 @@ static void math_clear_src_valid(TensixState *p_tensix, uint32_t pipe, uint32_t 
             TTSIM_VERIFY(p_tensix->src_b_valid & (1 << p_tensix->src_b_matrix_bank), NonContractualBehavior, "SrcB bank is not valid");
             p_tensix->src_b_valid &= ~(1 << p_tensix->src_b_matrix_bank);
         }
+        math_src_released(p_tensix, true, p_tensix->src_b_matrix_bank);
         p_tensix->src_b_matrix_bank ^= 1;
     }
 }
@@ -848,6 +980,7 @@ TENSIX_EXECUTE_MOVD2A() {
     uint32_t n_rows = 4;
     TTSIM_VERIFY(!(dst & (n_rows - 1)), UnsupportedFunctionality, "dst=%d", dst);
     TTSIM_VERIFY(!(src & (n_rows - 1)), UnsupportedFunctionality, "src=%d", src);
+    math_src_move(p_tensix, false);
     uint32_t src_a_bank = p_tensix->src_a_matrix_bank;
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
@@ -900,6 +1033,7 @@ TENSIX_EXECUTE_MOVD2A() {
 
 TENSIX_EXECUTE_MOVD2B() {
     TTSIM_VERIFY(!instr_mod || (instr_mod == 2), UnsupportedFunctionality, "instr_mod=%d", instr_mod);
+    math_src_move(p_tensix, true);
     uint32_t src_b_bank = p_tensix->src_b_matrix_bank;
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
@@ -968,9 +1102,11 @@ TENSIX_EXECUTE_MOVB2A() {
     if (!(p_tensix->src_b_valid & (1 << src_b_bank))) {
         return false; // stall until SrcB valid
     }
+    math_src_waited(p_tensix, true);
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
     const TensixConfigState *p_config = &p_tensix->config[state_id];
+    math_src_move(p_tensix, false);
 #if TT_ARCH_VERSION == 0
     uint32_t src_b_fmt = math_srcb_format(p_tensix, p_config, pipe, src_b_bank);
     TTSIM_VERIFY((src_b_fmt != 12) && (src_b_fmt != 13), UndefinedBehavior, "src_b_fmt=%d", src_b_fmt);
@@ -1004,8 +1140,8 @@ TENSIX_EXECUTE_ZEROACC() {
     clear_mode |= use_32_bit_mode << 2; // remap to be equivalent to WH fields
 #endif
 #if TT_ARCH_VERSION == 1
-    if (clear_zero_flags) { // UndefinedBehavior() in spec, only supported in very limited cases for a HW bug workaround
-        TTSIM_VERIFY(clear_mode == 5, UndefinedBehavior, "clear_zero_flags=%d is dangerous and should not be used (clear_mode=%d)", clear_zero_flags, clear_mode);
+    if (clear_zero_flags) { // NonContractualBehavior() in spec, only supported in very limited cases for a HW bug workaround
+        TTSIM_VERIFY(clear_mode == 5, NonContractualBehavior, "clear_zero_flags=%d is dangerous and should not be used (clear_mode=%d)", clear_zero_flags, clear_mode);
     }
 #endif
 
@@ -1020,7 +1156,12 @@ TENSIX_EXECUTE_ZEROACC() {
             TTSIM_VERIFY(!p_config->ALU_ACC_CTRL_INT8_math_enabled, UnimplementedFunctionality, "ALU_ACC_CTRL_INT8_math_enabled");
 #if TT_ARCH_VERSION == 0
             if (p_config->ALU_ACC_CTRL_Fp32_enabled) {
-                p_tensix->dst_row_valid[dst32b_adjust_row(dst)] = false;
+                uint32_t row = dst32b_adjust_row(dst);
+                p_tensix->dst_row_valid[row] = false;
+                // HW erratum: the 16-bit row numbered dst is marked unwritten too when it is in another quarter of Dest
+                if ((row ^ dst) & (DST_ROWS / 4 * 3)) {
+                    p_tensix->dst_row_valid[dst] = false;
+                }
             } else {
                 p_tensix->dst_row_valid[dst] = false;
             }
@@ -1080,6 +1221,8 @@ TENSIX_EXECUTE_ZEROSRC() {
     TTSIM_VERIFY(src_mask, UnsupportedFunctionality, "no-op mask: src_mask=%d", src_mask);
     TTSIM_VERIFY(!zero_val, UnsupportedFunctionality, "zero_val=%d", zero_val);
 
+    // Note: ZEROSRC does not wait for an UNPACR still writing a bank it clears; on WH some of that UNPACR's datums can
+    // land after the clear unless a STALLWAIT on the unpackers comes first; not modeled (timing)
     if (bank_mask == 1) {
         TTSIM_VERIFY(!write_mode, UnsupportedFunctionality, "write_mode=%d", write_mode);
         TTSIM_VERIFY(src_mask == 3, UnsupportedFunctionality, "src_mask=%d", src_mask);
@@ -1104,6 +1247,9 @@ TENSIX_EXECUTE_ZEROSRC() {
     return true;
 }
 
+// Not checked: on Wormhole, a MOVA2D or MOVB2D issued while the thread's earlier Matrix Unit instructions are still
+// running starts late, and neither SFPLOAD nor PACR's Dest interlock waits for it, so either can read the old data
+// unless a STALLWAIT on C7 separates them. ttsim moves at once.
 TENSIX_EXECUTE_MOVA2D() {
     TTSIM_VERIFY(instr_mod == 2, UnsupportedFunctionality, "instr_mod=%d", instr_mod); // move 8 rows
     TTSIM_VERIFY(!(dst & 7), UnsupportedFunctionality, "dst=%d", dst);
@@ -1112,6 +1258,7 @@ TENSIX_EXECUTE_MOVA2D() {
     if (!(p_tensix->src_a_valid & (1 << src_a_bank))) {
         return false; // stall until SrcA valid
     }
+    math_src_waited(p_tensix, false);
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
     const TensixConfigState *p_config = &p_tensix->config[state_id];
@@ -1182,6 +1329,7 @@ TENSIX_EXECUTE_MOVB2D() {
     if (!(p_tensix->src_b_valid & (1 << src_b_bank))) {
         return false; // stall until SrcB valid
     }
+    math_src_waited(p_tensix, true);
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
     const TensixConfigState *p_config = &p_tensix->config[state_id];
@@ -1263,6 +1411,7 @@ TENSIX_EXECUTE_TRNSPSRCB() {
     if (!(p_tensix->src_b_valid & (1 << src_b_bank))) {
         return false; // stall until SrcB valid
     }
+    math_src_waited(p_tensix, true);
 
     uint32_t row_base = 16;
     for (uint32_t i = 0; i < 16; i++) {
@@ -1566,6 +1715,8 @@ static bool tensix_matmul_op(TensixState *p_tensix, uint32_t pipe, uint32_t dst,
     if (!(p_tensix->src_a_valid & (1 << src_a_bank)) || !(p_tensix->src_b_valid & (1 << src_b_bank))) {
         return false; // stall until both valid
     }
+    math_src_waited(p_tensix, false);
+    math_src_waited(p_tensix, true);
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
     const TensixConfigState *p_config = &p_tensix->config[state_id];
@@ -1746,7 +1897,11 @@ static bool tensix_elw_op(TensixState *p_tensix, uint32_t pipe, uint32_t dst, ui
                           uint32_t src_b_offset = 0) {
     TTSIM_VERIFY(!(dst & 7), UnsupportedFunctionality, "dst=%d", dst);
     if (elw_op::is_mul()) {
+#if TT_ARCH_VERSION == 0
         TTSIM_VERIFY(!dest_accum_en, NonContractualBehavior, "dest_accum_en=%d", dest_accum_en);
+#else
+        TTSIM_VERIFY(!dest_accum_en, UndefinedBehavior, "dest_accum_en=%d", dest_accum_en);
+#endif
         dest_accum_en = true; // ELWMUL forces accumulation, independent of dest_accum_en
     }
     uint32_t src_a_bank = p_tensix->src_a_matrix_bank;
@@ -1754,6 +1909,8 @@ static bool tensix_elw_op(TensixState *p_tensix, uint32_t pipe, uint32_t dst, ui
     if (!(p_tensix->src_a_valid & (1 << src_a_bank)) || !(p_tensix->src_b_valid & (1 << src_b_bank))) {
         return false; // stall until both valid
     }
+    math_src_waited(p_tensix, false);
+    math_src_waited(p_tensix, true);
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
     const TensixConfigState *p_config = &p_tensix->config[state_id];
@@ -1890,6 +2047,8 @@ TENSIX_EXECUTE_GMPOOL() {
     if (!(p_tensix->src_a_valid & (1 << src_a_bank)) || !(p_tensix->src_b_valid & (1 << src_b_bank))) {
         return false; // stall until both valid
     }
+    math_src_waited(p_tensix, false);
+    math_src_waited(p_tensix, true);
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
     const TensixConfigState *p_config = &p_tensix->config[state_id];
@@ -1926,11 +2085,9 @@ TENSIX_EXECUTE_GMPOOL() {
         }
         for (uint32_t i = 0; i < 16; i++) {
             uint32_t src_a_val = p_tensix->src_a[src_a_bank][src_a_row + i][j];
-#if TT_ARCH_VERSION == 0
-            if (src_a_fmt != 4) {
+            if (src_a_fmt != 4) { // the max array takes a bf16-class SrcA with seven mantissa bits
                 src_a_val &= 0xFFFF0000;
             }
-#endif
             if (!(src_a_val & 0x7F800000)) {
                 src_a_val = 0;
             }
@@ -1939,6 +2096,11 @@ TENSIX_EXECUTE_GMPOOL() {
             }
         }
         if (use_dst32b) {
+#if TT_ARCH_VERSION == 1
+            if (src_a_fmt == 4) { // bug for bug: a tf32 max's low three mantissa bits are written again at bits 12:10
+                max |= (max >> 3) & 0x1C00;
+            }
+#endif
             write_dst32b<true>(p_tensix, dst_row, j, dst_encode_fp32(max));
             for (uint32_t i = 1; i < 4; i++) {
                 write_dst32b(p_tensix, dst_row + i, j, 0);
@@ -1980,6 +2142,7 @@ TENSIX_EXECUTE_CLEARDVALID() {
         if (cleardvalid & 1) {
             TTSIM_VERIFY(p_tensix->src_a_valid & (1 << p_tensix->src_a_matrix_bank), NonContractualBehavior, "SrcA bank is not valid");
             p_tensix->src_a_valid &= ~(1 << p_tensix->src_a_matrix_bank);
+            math_src_released(p_tensix, false, p_tensix->src_a_matrix_bank);
             if (!(reset & 2)) {
                 p_tensix->src_a_matrix_bank ^= 1;
             }
@@ -1987,6 +2150,7 @@ TENSIX_EXECUTE_CLEARDVALID() {
         if (cleardvalid & 2) {
             TTSIM_VERIFY(p_tensix->src_b_valid & (1 << p_tensix->src_b_matrix_bank), NonContractualBehavior, "SrcB bank is not valid");
             p_tensix->src_b_valid &= ~(1 << p_tensix->src_b_matrix_bank);
+            math_src_released(p_tensix, true, p_tensix->src_b_matrix_bank);
             if (!(reset & 2)) {
                 p_tensix->src_b_matrix_bank ^= 1;
             }
@@ -2364,9 +2528,16 @@ TENSIX_EXECUTE_PACR() {
 #endif
 
     for (uint32_t packer = 0; packer < n_packers; packer++) {
-        uint32_t tpg_x = p_tensix->packer_valid ? p_tensix->packer_tpg_x[packer] : 0;
-        uint32_t tpg_y = p_tensix->packer_valid ? p_tensix->packer_tpg_y[packer] : 0;
-        [[maybe_unused]] uint32_t tpg_z = p_tensix->packer_valid ? p_tensix->packer_tpg_z[packer] : 0;
+#if TT_ARCH_VERSION == 0
+        // WH's tile position generator is not reset by Last: it runs on from tile to tile
+        uint32_t tpg_x = p_tensix->packer_tpg_x[packer];
+        uint32_t tpg_y = p_tensix->packer_tpg_y[packer];
+        [[maybe_unused]] uint32_t tpg_z = p_tensix->packer_tpg_z[packer];
+#else
+        uint32_t tpg_x = p_tensix->packer_valid[packer] ? p_tensix->packer_tpg_x[packer] : 0;
+        uint32_t tpg_y = p_tensix->packer_valid[packer] ? p_tensix->packer_tpg_y[packer] : 0;
+        [[maybe_unused]] uint32_t tpg_z = p_tensix->packer_valid[packer] ? p_tensix->packer_tpg_z[packer] : 0;
+#endif
         uint32_t edge_mask_b = (p_config->PCK_EDGE_TILE_ROW_SET_SELECT_select >> (2 * packer)) & 3;
 #if TT_ARCH_VERSION == 1
         if (p_config->PCK_EDGE_TILE_FACE_SET_SELECT_enable) { // the face's row set mapping replaces the select
@@ -2394,7 +2565,23 @@ TENSIX_EXECUTE_PACR() {
                 "read_intf_sel=%d with pack_row=%d", read_intf_sel, pack_row);
         }
 #endif
-        if (!p_tensix->packer_valid) {
+        // A BFP tile takes part of its L1 placement from a later PACR when its address inputs change while it is
+        // open: on BH the whole tile moves (within its first four Dst rows), on WH its exponents do. A Flush may
+        // follow new addresses: it drains the open tile to the old ones
+#if TT_ARCH_VERSION == 1
+        uint32_t l1_base = packer_addrs[packer] + ((p_addr_ctrl->ch1_y * p_config->PCK0_ADDR_CTRL_XY_REG_1_Ystride +
+                                                    p_addr_ctrl->ch1_z * p_config->PCK0_ADDR_CTRL_ZW_REG_1_Zstride) >> 4);
+#else
+        uint32_t l1_base = packer_addrs[packer] + ((p_addr_ctrl->ch1_y + (p_addr_ctrl->ch1_z << 8)) << 12);
+#endif
+        TTSIM_VERIFY(!p_tensix->packer_valid[packer] || flush || !is_bfp_format(pack_dst_format) ||
+                     (l1_base == p_tensix->packer_l1_base[packer]),
+            UnsupportedFunctionality, "bfp tile's L1 address changed mid-tile: 0x%x then 0x%x",
+            p_tensix->packer_l1_base[packer] << 4, l1_base << 4);
+        if (!p_tensix->packer_valid[packer]) {
+            p_tensix->packer_l1_base[packer] = l1_base;
+        }
+        if (!p_tensix->packer_valid[packer]) { // each packer takes new addresses on its first PACR of a tile
             uint32_t addr = packer_addrs[packer];
 #if TT_ARCH_VERSION == 0
             TTSIM_VERIFY(!p_addr_ctrl->ch1_z, UnimplementedFunctionality, "ch1_z=%d", p_addr_ctrl->ch1_z);
@@ -2561,8 +2748,8 @@ TENSIX_EXECUTE_PACR() {
                 }
                 if (uint32_t apply_relu = p_config->STACC_RELU_ApplyRelu) {
                     TTSIM_VERIFY(apply_relu <= 3, UnsupportedFunctionality, "apply_relu=%d", apply_relu);
-                    TTSIM_VERIFY((apply_relu == 1) || !(p_config->STACC_RELU_ReluThreshold & 0x8000), UndefinedBehavior,
-                        "negative relu_threshold=0x%x", p_config->STACC_RELU_ReluThreshold);
+                    TTSIM_VERIFY((apply_relu == 1) || !(p_config->STACC_RELU_ReluThreshold & 0x8000),
+                        NonContractualBehavior, "negative relu_threshold=0x%x", p_config->STACC_RELU_ReluThreshold);
                     TTSIM_VERIFY((apply_relu != 3) || !is_bfp_format(pack_dst_format) || (intermediate_format == 0) ||
                                  !(p_config->STACC_RELU_ReluThreshold & 0x7FFF) ||
                                  (p_config->STACC_RELU_ReluThreshold & ((intermediate_format == 2) ? 0x7C00 : 0x7F80)),
@@ -2570,6 +2757,12 @@ TENSIX_EXECUTE_PACR() {
                     TTSIM_VERIFY((intermediate_format == 0) || (intermediate_format == 1) || (intermediate_format == 2) ||
                                  (intermediate_format == 5) || (intermediate_format == 6) || (intermediate_format == 8),
                         UnimplementedFunctionality, "relu intermediate_format=%d",
+                        intermediate_format);
+                    // Read_raw keeps the FP16 or BF16 value unrounded, and the hardware's threshold compare then isn't
+                    // a compare of that value (a value equal to the threshold can survive, depending on the other half
+                    // of its Dest word)
+                    TTSIM_VERIFY((apply_relu != 2) || !read_raw || ((intermediate_format != 1) && (intermediate_format != 5)),
+                        UnimplementedFunctionality, "read_raw apply_relu=%d intermediate_format=%d", apply_relu,
                         intermediate_format);
 #if TT_ARCH_VERSION == 1
                     if ((intermediate_format == 1) && p_config->PCK_DEST_RD_CTRL_Round_10b_mant) {
@@ -2787,6 +2980,13 @@ TENSIX_EXECUTE_PACR() {
                     data_pad_end = std::max(data_pad_end, data_end - tail + std::min(2 * tail, group));
                 }
             }
+            // a tile read in datums narrower than 32 bits ends on a whole 16 datum row: a half row is followed by zeros
+            if (src_element_size_bits != 32) {
+                uint32_t datums = ((data_end - p_tensix->packer_dst_data_start[packer]) * 8) / dst_element_size_bits;
+                if (datums % 16) {
+                    data_pad_end = std::max(data_pad_end, data_end + ((16 - datums % 16) * dst_element_size_bits) / 8);
+                }
+            }
 #endif
             if (data_end != data_pad_end) {
                 TTSIM_VERIFY(data_pad_end <= TENSIX_SRAM_SIZE, UndefinedBehavior, "pad out of bounds data_pad_end=0x%x", data_pad_end);
@@ -2818,7 +3018,9 @@ TENSIX_EXECUTE_PACR() {
             }
         }
     }
-    p_tensix->packer_valid = !last && !flush;
+    for (uint32_t packer = 0; packer < n_packers; packer++) { // a packer the PACR didn't use keeps its tile open
+        p_tensix->packer_valid[packer] = !last && !flush;
+    }
 
     uint32_t y0_incr, y0_cr, y0_clear;
     uint32_t y1_incr, y1_cr, y1_clear;
@@ -3092,16 +3294,25 @@ TENSIX_EXECUTE_UNPACR() {
         TTSIM_VERIFY(!(src_addr_bits & 127) || ((src_addr_bits & 127) + count * in_element_size_bits <= 128), UndefinedBehavior,
             "bfp_exp_stream: misaligned src_addr_bits=0x%x count=%d", src_addr_bits, count);
     }
+    // BFP2 unpacks in pairs of datums: an odd count also writes the position after the last datum
+    TTSIM_VERIFY(!((in_element_size_bits == 2) && (count & 1)), UnsupportedFunctionality,
+        "bfp2 with an odd count=%d", count);
     if (unpack_to_dst) {
         TTSIM_VERIFY(!p_tensix->thread[pipe].SRCA_SET_SetOvrdWithAddr, UndefinedBehavior, "unpack_to_dst: SRCA_SET_SetOvrdWithAddr=1");
     } else {
         TTSIM_VERIFY(p_tensix->thread[pipe].SRCA_SET_SetOvrdWithAddr, UnsupportedFunctionality, "!unpack_to_dst: SRCA_SET_SetOvrdWithAddr=0");
+        unpack_src_written(p_tensix, pipe, unpack_block_selection, src_bank);
     }
 
     uint32_t throttle_mode = unpack_block_selection ? p_config->THCON_SEC1_REG2_Throttle_mode
                                                     : p_config->THCON_SEC0_REG2_Throttle_mode;
 #if TT_ARCH_VERSION == 0
     TTSIM_VERIFY(throttle_mode <= 2, UndefinedBehavior, "invalid throttle_mode=%d", throttle_mode);
+    // At x4, a BFP4 run that starts within a group of 16 exponents must end within it: crossing into the next group
+    // gives datums past the boundary wrong exponents
+    TTSIM_VERIFY(!(bfp_exp_stream && (in_element_size_bits == 4) && (throttle_mode == 2) && (first_datum & 255) &&
+                   (first_datum + count > ((first_datum + 255) & ~255u))),
+        UndefinedBehavior, "bfp_exp_stream: bfp4 first_datum=%d count=%d crosses an exponent group", first_datum, count);
 #elif TT_ARCH_VERSION == 1
     // Forced x8 works only for 8-bit (and BFP2, which always runs at x1) input: BFP4 hangs, 16- and 32-bit input
     // loses half its rows, and FP32 converted to FP16 or BF16 hangs
@@ -3138,6 +3349,14 @@ TENSIX_EXECUTE_UNPACR() {
         burst_rows = std::min(burst_rows, 8u);
         TTSIM_VERIFY(!(start_row & (burst_rows - 1)), UnsupportedFunctionality,
             "src_a start_row=%d burst_rows=%d may span 16-row set boundary and drop writes", start_row, burst_rows);
+#if TT_ARCH_VERSION == 1
+        // Datums that don't start at a 16-byte L1 word reach SrcA in groups that straddle rows, and a group that
+        // straddles a 16-row set boundary loses its datums past the boundary
+        uint32_t end_row = (dst_addr + count - 1) / ROW_SIZE;
+        TTSIM_VERIFY(!((src_addr_bits & 127) && ((start_row ^ end_row) & ~15u)), UndefinedBehavior,
+            "src_a datums from a misaligned src_addr_bits=0x%x span 16-row set boundary at rows %d..%d and drop writes",
+            src_addr_bits, start_row, end_row);
+#endif
     }
 
     for (uint32_t i = 0; i < count; i++) {
@@ -3345,6 +3564,8 @@ TENSIX_EXECUTE_UNPACR_NOP() {
     uint32_t src_clr_val_ctrl = bits<2,2>(no_op); // clear to negative inf
     uint32_t stall_clr_cntrl = bits<4,4>(no_op); // called wait_like_unpacr in tt-isa-documentation
     uint32_t set_dvalid = (no_op == 7);
+    // Note: a clear in the same cycle as a ZEROSRC with SingleBankMatrixUnit or BothBanks clears the ZEROSRC's bank
+    // choice instead of the unpack bank, and the two share the SrcA clear value; not modeled (timing)
 #endif
 
     uint32_t unpack_bank = unpack_block_selection ? p_tensix->src_b_unpack_bank : p_tensix->src_a_unpack_bank;
@@ -3355,6 +3576,7 @@ TENSIX_EXECUTE_UNPACR_NOP() {
         if (src_valid & (1 << wait_bank)) {
             return false; // stall until not valid
         }
+        unpack_src_written(p_tensix, pipe, unpack_block_selection, unpack_bank);
 
         if (unpack_block_selection) {
 #if TT_ARCH_VERSION == 1
@@ -3770,7 +3992,7 @@ TENSIX_EXECUTE_SFPLOADI() {
         case 4: val = uint32_t(int32_t(int16_t(uint16_t(imm16)))); break; // treat imm16 as sint16
         case 8: val = imm16 << 16; break; // will put immediate in upper part
         case 10: val = imm16; break; // will put immediate in lower part
-        default: TTSIM_ERROR(UndefinedBehavior, "instr_mod0=%d", instr_mod0);
+        default: TTSIM_ERROR(NonContractualBehavior, "instr_mod0=%d", instr_mod0);
     }
 
     uint32_t mask = p_tensix->cc_en ? p_tensix->cc : 0xFFFFFFFF;
@@ -3794,7 +4016,7 @@ TENSIX_EXECUTE_SFPLOADI() {
             });
             break;
         default:
-            TTSIM_ERROR(UndefinedBehavior, "instr_mod0=%d", instr_mod0);
+            TTSIM_ERROR(AssertionFailure, "instr_mod0=%d", instr_mod0);
     }
     return true;
 }
@@ -4297,8 +4519,8 @@ TENSIX_EXECUTE_SFPMOV() {
     for_each_lane(mask, [=](uint32_t lane) {
         uint32_t src;
         if (instr_mod1 == 8) {
-            src = p_tensix->prng_state[lane];
             p_tensix->prng_state[lane] = step_prng(p_tensix->prng_state[lane]);
+            src = p_tensix->prng_state[lane];
         } else {
             src = p_tensix->l_regs[lreg_c][lane];
             if (instr_mod1 & 1) { // negate
@@ -4448,6 +4670,9 @@ TENSIX_EXECUTE_SFPSETMAN() {
     return true;
 }
 
+// Not checked: on Wormhole, SFPMAD and the other two-cycle Vector Unit ops (SFPADD, SFPMUL, SFPADDI, SFPMULI, SFPLUT,
+// SFPLUTFP32) have no interlock, so the Vector Unit instruction issued right after one must not read an LReg it writes
+// (Blackhole stalls instead). ttsim writes the result at once; on hardware the reader sees the old value.
 TENSIX_EXECUTE_SFPMAD() {
 #if TT_ARCH_VERSION >= 1
     TTSIM_VERIFY(instr_mod1 <= 3, UnsupportedFunctionality, "instr_mod1=%d", instr_mod1);
@@ -4542,7 +4767,7 @@ TENSIX_EXECUTE_SFPPUSHC() {
     TTSIM_VERIFY(!instr_mod1, UnsupportedFunctionality, "instr_mod1=%d", instr_mod1);
     TTSIM_VERIFY(!lreg_dest, UnsupportedFunctionality, "lreg_dest=%d", lreg_dest);
 
-    TTSIM_VERIFY(p_tensix->cc_sp < CC_STACK_SIZE, UndefinedBehavior, "CC stack overflow");
+    TTSIM_VERIFY(p_tensix->cc_sp < CC_STACK_SIZE, NonContractualBehavior, "CC stack overflow");
     p_tensix->cc_en_stack[p_tensix->cc_sp] = p_tensix->cc_en;
     p_tensix->cc_stack[p_tensix->cc_sp] = p_tensix->cc;
     p_tensix->cc_sp++;
@@ -4553,7 +4778,7 @@ TENSIX_EXECUTE_SFPPOPC() {
     TTSIM_VERIFY(!instr_mod1, UnsupportedFunctionality, "instr_mod1=%d", instr_mod1);
     TTSIM_VERIFY(!lreg_dest, UnsupportedFunctionality, "lreg_dest=%d", lreg_dest);
 
-    TTSIM_VERIFY(p_tensix->cc_sp, UndefinedBehavior, "CC stack underflow");
+    TTSIM_VERIFY(p_tensix->cc_sp, NonContractualBehavior, "CC stack underflow");
     p_tensix->cc_sp--;
     p_tensix->cc_en = p_tensix->cc_en_stack[p_tensix->cc_sp];
     p_tensix->cc = p_tensix->cc_stack[p_tensix->cc_sp];
@@ -4643,7 +4868,14 @@ TENSIX_EXECUTE_SFPXOR() {
 
 TENSIX_EXECUTE_SFP_STOCH_RND() {
     TTSIM_VERIFY(rnd_mode != 1, UnsupportedFunctionality, "stochastic rounding is explicitly out of scope");
+    // UseImm5 (instr_mod1 bit 3) and the immediate are read only by the int32 to int8/uint8 flavors
+    TTSIM_VERIFY((((instr_mod1 & 6) == 4)) || (!(instr_mod1 & 8) && !imm8_math), NonContractualBehavior,
+        "instr_mod1=%d imm8_math=%d", instr_mod1, imm8_math);
+#if TT_ARCH_VERSION == 1
+    TTSIM_VERIFY((rnd_mode == 0) || (rnd_mode == 2), UnsupportedFunctionality, "rnd_mode=%d", rnd_mode);
+#else
     TTSIM_VERIFY(!rnd_mode, UnsupportedFunctionality, "rnd_mode=%d", rnd_mode);
+#endif
     TTSIM_VERIFY(lreg_dest < 8, UnsupportedFunctionality, "lreg_dest=%d", lreg_dest);
     TTSIM_VERIFY(!imm8_math, UnsupportedFunctionality, "imm8_math=%d", imm8_math);
     TTSIM_VERIFY((instr_mod1 <= 7) || (instr_mod1 == 12) || (instr_mod1 == 13), UndefinedBehavior, "instr_mod1=%d", instr_mod1);
@@ -4652,6 +4884,13 @@ TENSIX_EXECUTE_SFP_STOCH_RND() {
     // XXX tighten this to lreg_src_b == 9
     TTSIM_VERIFY(!lreg_src_b || (lreg_src_b == 9), UnsupportedFunctionality, "lreg_src_b=%d", lreg_src_b);
 
+    // The discarded bits round up when they are at least this
+#if TT_ARCH_VERSION == 1
+    // Note: HW erratum: round to zero rounds away from zero when the discarded bits are all ones
+    uint32_t round_up_bits = (rnd_mode == 2) ? 0x7FFFFF : 0x400000;
+#else
+    constexpr uint32_t round_up_bits = 0x400000;
+#endif
     uint32_t mask = p_tensix->cc_en ? p_tensix->cc : 0xFFFFFFFF;
     for_each_lane(mask, [=](uint32_t lane) {
         p_tensix->prng_state[lane] = step_prng(p_tensix->prng_state[lane]); // always step PRNG, even if unused
@@ -4665,7 +4904,7 @@ TENSIX_EXECUTE_SFP_STOCH_RND() {
             } else { // XXX this path can be simplified
                 uint32_t discarded_bits = src & 0xFFFF;
                 src -= discarded_bits;
-                if ((discarded_bits << 7) >= 0x400000) { // XXX this disagrees with the pseudocode
+                if ((discarded_bits << 7) >= (round_up_bits & ~0x7F)) { // the top 16 of its 23 bits
                     src += 0x10000;
                 }
             }
@@ -4682,7 +4921,7 @@ TENSIX_EXECUTE_SFP_STOCH_RND() {
             } else {
                 uint64_t mag = 0x800000 | (src & 0x7FFFFF);
                 mag = (exp >= 0) ? mag << exp : mag >> -exp;
-                mag = (mag >> 23) + ((mag & 0x7FFFFF) >= 0x400000);
+                mag = (mag >> 23) + ((mag & 0x7FFFFF) >= round_up_bits);
                 if (mag > max_magnitude) {
                     mag = max_magnitude;
                 }
@@ -4709,6 +4948,7 @@ TENSIX_EXECUTE_SFPCAST() {
     TTSIM_VERIFY(instr_mod1 <= 3, NonContractualBehavior, "instr_mod1=%d", instr_mod1);
     TTSIM_VERIFY(instr_mod1 != 2, UnsupportedFunctionality, "instr_mod1=%d should be replaced by SFPABS", instr_mod1);
 #else
+    TTSIM_VERIFY((instr_mod1 & 6) != 6, UndefinedBehavior, "instr_mod1=%d", instr_mod1);
     TTSIM_VERIFY(instr_mod1 <= 5, NonContractualBehavior, "instr_mod1=%d", instr_mod1);
     TTSIM_VERIFY(instr_mod1 != 5, UnsupportedFunctionality, "stochastic rounding is explicitly out of scope");
 #endif
@@ -4760,7 +5000,7 @@ TENSIX_EXECUTE_SFPCONFIG() {
             p_tensix->load_macro_misc = imm16_math;
             break;
         case 9: case 10:
-            TTSIM_ERROR(NonContractualBehavior, "config_dest=%d", config_dest);
+            TTSIM_ERROR(UndefinedBehavior, "config_dest=%d", config_dest);
         case 11 ... 14:
             TTSIM_VERIFY(!imm16_math, UnsupportedFunctionality, "config_dest=%d imm16_math=0x%x", config_dest, imm16_math);
             if (instr_mod1 & 1) { // write "default" immediate to LReg
@@ -4845,7 +5085,7 @@ TENSIX_EXECUTE_SFPLOADMACRO() {
 }
 
 TENSIX_EXECUTE_SFPSHFT2() {
-    TTSIM_VERIFY(instr_mod1 <= 6, UndefinedBehavior, "instr_mod1=%d", instr_mod1);
+    TTSIM_VERIFY(instr_mod1 <= 6, NonContractualBehavior, "instr_mod1=%d: shifts as 5", instr_mod1);
     TTSIM_VERIFY(instr_mod1 >= 3, UnsupportedFunctionality, "instr_mod1=%d", instr_mod1); // allow 3..6
 #if TT_ARCH_VERSION == 0
     // XXX Would be good to add a checker for the WH-only scheduling restrictions on some modes
@@ -4923,6 +5163,8 @@ static inline uint32_t lut16_to_fp32(uint16_t x) {
 }
 
 TENSIX_EXECUTE_SFPLUTFP32() {
+    // Mod1[0] is read only with Mod1[1] set and Mod1[3] clear
+    TTSIM_VERIFY(!(instr_mod1 & 1) || ((instr_mod1 & 0xA) == 2), NonContractualBehavior, "instr_mod1=%d", instr_mod1);
     TTSIM_VERIFY((instr_mod1 == 2) || (instr_mod1 == 6), UnsupportedFunctionality, "instr_mod1=%d", instr_mod1);
     TTSIM_VERIFY(lreg_dest < 8, UnsupportedFunctionality, "lreg_dest=%d", lreg_dest);
 
@@ -5003,7 +5245,7 @@ TENSIX_EXECUTE_SFPMUL24() {
     TTSIM_VERIFY(!(instr_mod1 & 2), NonContractualBehavior, "reserved bit set in instr_mod1=%d", instr_mod1);
     TTSIM_VERIFY(instr_mod1 <= 1, UnsupportedFunctionality, "instr_mod1=%d", instr_mod1);
     TTSIM_VERIFY(lreg_dest < 8, UnsupportedFunctionality, "lreg_dest=%d", lreg_dest);
-    TTSIM_VERIFY(lreg_src_c == 9, NonContractualBehavior, "lreg_src_c=%d", lreg_src_c);
+    TTSIM_VERIFY(lreg_src_c == 9, UndefinedBehavior, "lreg_src_c=%d", lreg_src_c);
     uint32_t lreg_a = lreg_src_a;
     uint32_t lreg_b = lreg_src_b;
 
@@ -5150,6 +5392,13 @@ static bool block_mask_holds(uint32_t block, uint32_t inst) {
 TENSIX_EXECUTE_STALLWAIT() {
     TTSIM_VERIFY(wait_res, UnsupportedFunctionality, "wait_res=0x%x", wait_res);
     TTSIM_VERIFY(stall_res, UnsupportedFunctionality, "stall_res=0x%x", stall_res);
+    // Waiting for an unpacker waits for this thread's writes to Src through it
+    if (wait_res & 0x2) {
+        p_tensix->src_unpacked[0][pipe] = 0;
+    }
+    if (wait_res & 0x4) {
+        p_tensix->src_unpacked[1][pipe] = 0;
+    }
 #if TT_ARCH_VERSION == 0
     wait_res &= ~0x60FF; // never need to wait for ThCon memory requests, Unpack0/1, Pack0/1/2/3, FPU, RISCV MMIO, or SFPU
     if (wait_res & 0x100) {
@@ -5168,12 +5417,14 @@ TENSIX_EXECUTE_STALLWAIT() {
         if (!(p_tensix->src_a_valid & (1 << p_tensix->src_a_matrix_bank))) {
             return false; // stall until SrcA valid
         }
+        math_src_waited(p_tensix, false);
         wait_res &= ~0x400;
     }
     if (wait_res & 0x800) {
         if (!(p_tensix->src_b_valid & (1 << p_tensix->src_b_matrix_bank))) {
             return false; // stall until SrcB valid
         }
+        math_src_waited(p_tensix, true);
         wait_res &= ~0x800;
     }
 #else
@@ -5190,12 +5441,14 @@ TENSIX_EXECUTE_STALLWAIT() {
         if (!(p_tensix->src_a_valid & (1 << p_tensix->src_a_matrix_bank))) {
             return false; // stall until SrcA valid
         }
+        math_src_waited(p_tensix, false);
         wait_res &= ~0x80;
     }
     if (wait_res & 0x100) {
         if (!(p_tensix->src_b_valid & (1 << p_tensix->src_b_matrix_bank))) {
             return false; // stall until SrcB valid
         }
+        math_src_waited(p_tensix, true);
         wait_res &= ~0x100;
     }
 #endif
@@ -5245,8 +5498,6 @@ TENSIX_EXECUTE_SEMGET() {
 
 TENSIX_EXECUTE_SEMWAIT() {
     TTSIM_VERIFY(__builtin_popcount(sem_sel) == 1, UnsupportedFunctionality, "sem_sel=0x%x is not one-hot", sem_sel);
-    TTSIM_VERIFY(wait_sem_cond, UndefinedBehavior, "wait_sem_cond=%d", wait_sem_cond);
-    TTSIM_VERIFY((wait_sem_cond == 1) || (wait_sem_cond == 2), UnsupportedFunctionality, "wait_sem_cond=%d", wait_sem_cond);
     // XXX the thread stops here whatever stall_res says
     uint32_t block = stall_res ? stall_res : 0x040;
 #if TT_ARCH_VERSION == 0
@@ -5256,6 +5507,8 @@ TENSIX_EXECUTE_SEMWAIT() {
                                                  (p_tensix->wait_sem_cond[pipe] == wait_sem_cond)),
         UndefinedBehavior, "may replace this thread's latched wait, whose block mask 0x%x lacks B1", p_tensix->wait_block[pipe]);
 #endif
+    TTSIM_VERIFY(wait_sem_cond, NonContractualBehavior, "wait_sem_cond=%d waits as STALLWAIT", wait_sem_cond);
+    TTSIM_VERIFY((wait_sem_cond == 1) || (wait_sem_cond == 2), UnsupportedFunctionality, "wait_sem_cond=%d", wait_sem_cond);
 
     for (uint32_t sems = sem_sel; sems; sems &= sems - 1) {
         uint32_t sem_index = __builtin_ctz(sems);
@@ -5278,8 +5531,10 @@ TENSIX_EXECUTE_SEMWAIT() {
     return true;
 }
 
+// Not checked: the instruction right after a WRCFG must not consume what it writes (e.g. a PACR right after a WRCFG of
+// its L1 destination address packs to the previous destination on Blackhole).
 TENSIX_EXECUTE_WRCFG() {
-    TTSIM_VERIFY(cfg_reg < 4 * TENSIX_CFG_STATE_SIZE, UndefinedBehavior, "cfg_reg=%d", cfg_reg);
+    TTSIM_VERIFY(cfg_reg < 4 * TENSIX_CFG_STATE_SIZE, NonContractualBehavior, "cfg_reg=%d writes nothing", cfg_reg);
     TTSIM_VERIFY(gpr_address < std::size(p_tensix->dma_regs[pipe]), AssertionFailure, "gpr_address=%d out of range", gpr_address);
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
@@ -5296,7 +5551,7 @@ TENSIX_EXECUTE_WRCFG() {
 }
 
 TENSIX_EXECUTE_RDCFG() {
-    TTSIM_VERIFY(cfg_reg < 4 * TENSIX_CFG_STATE_SIZE, UndefinedBehavior, "cfg_reg=%d", cfg_reg);
+    TTSIM_VERIFY(cfg_reg < 4 * TENSIX_CFG_STATE_SIZE, NonContractualBehavior, "cfg_reg=%d", cfg_reg);
     TTSIM_VERIFY(gpr_address < std::size(p_tensix->dma_regs[pipe]), AssertionFailure, "gpr_address=%d out of range", gpr_address);
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
@@ -5305,7 +5560,10 @@ TENSIX_EXECUTE_RDCFG() {
 }
 
 TENSIX_EXECUTE_SETC16() {
-    TTSIM_VERIFY(setc16_reg < TENSIX_THD_STATE_SIZE, UndefinedBehavior, "setc16_reg=%d", setc16_reg);
+#if TT_ARCH_VERSION == 1
+    TTSIM_VERIFY(setc16_reg != 128, UndefinedBehavior, "setc16_reg=%d: Auto TTSync misses the state ID", setc16_reg);
+#endif
+    TTSIM_VERIFY(setc16_reg < TENSIX_THD_STATE_SIZE, NonContractualBehavior, "setc16_reg=%d", setc16_reg);
 
     // Note that there's no way to read these back, so we don't apply the THREAD_CFG*_REG_MASK at present
     switch (setc16_reg) {
@@ -5318,6 +5576,7 @@ TENSIX_EXECUTE_SETC16() {
 }
 
 static bool tensix_execute_rmwcib(TensixState *p_tensix, uint32_t pipe, uint32_t data, uint32_t mask, uint32_t cfg_reg_addr) {
+    TTSIM_VERIFY(cfg_reg_addr < 4 * TENSIX_CFG_STATE_SIZE, NonContractualBehavior, "cfg_reg_addr=%d writes nothing", cfg_reg_addr);
     uint32_t state_id = get_state_id(p_tensix, pipe);
     uint32_t value = tensix_cfg_rd32(p_tensix, state_id, 4 * cfg_reg_addr);
     value = (value & ~mask) | (data & mask);

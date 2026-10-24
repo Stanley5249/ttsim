@@ -214,6 +214,16 @@ struct TensixAddrCtrl {
     uint32_t ch1_w_cr;
 };
 
+// A MOP being expanded: the MOP instruction, its configuration as sampled when it was ingested, and the next step
+struct TensixMopState {
+    bool busy;
+    uint32_t inst;
+    uint32_t zmask;
+    uint32_t cfg[9];
+    uint32_t iter;
+    uint32_t step;
+};
+
 struct TensixState {
     uint32_t tile_id;
     uint32_t tensix_id;
@@ -229,6 +239,10 @@ struct TensixState {
     uint32_t replay_index[TENSIX_INST_PIPES];
     uint32_t replay_left[TENSIX_INST_PIPES];
     bool replay_execute_while_loading[TENSIX_INST_PIPES];
+    uint32_t replay_play_index[TENSIX_INST_PIPES]; // next replay buffer entry to emit
+    uint32_t replay_play_left[TENSIX_INST_PIPES]; // replay buffer entries still to emit
+    TensixMopState mop[TENSIX_INST_PIPES];
+    uint32_t expand_pipes_active; // pipes whose MOP or Replay Expander has instructions still to emit
 
     uint8_t mutex[TT_ARCH_VERSION ? 5 : 8]; // odd, but per docs, BH has fewer mutexes than WH
     uint8_t sem[8];
@@ -248,6 +262,10 @@ struct TensixState {
     bool dst_row_valid[DST_ROWS]; // would be nice to make this a bitmask, but this is easier for bringup
     uint32_t src_a_valid, src_a_unpack_bank, src_a_matrix_bank;
     uint32_t src_b_valid, src_b_unpack_bank, src_b_matrix_bank;
+    // [SrcA/SrcB], a bit per bank: banks the Matrix Unit has waited for since it got them, banks an unpacker wrote (per
+    // issuing thread, until it waits for that unpacker) since the Matrix Unit last released them, and banks a move
+    // wrote before the Matrix Unit got them
+    uint8_t src_waited[2], src_unpacked[2][TENSIX_INST_PIPES], src_moved[2];
 #if TT_ARCH_VERSION >= 1
     uint32_t src_a_format[2], src_b_format[2];
 #endif
@@ -277,7 +295,8 @@ struct TensixState {
     // Tensix cfg registers
     TensixThreadState thread[TENSIX_INST_PIPES];
     TensixAddrCtrl addr_ctrl[TENSIX_INST_PIPES][3]; // [pipe][unpack0, unpack1, pack]
-    bool packer_valid; // for carried state (below) across PACRs within a tile
+    bool packer_valid[4]; // per packer, for carried state (below) across PACRs within a tile
+    uint32_t packer_l1_base[4]; // the L1 address (16B units) a tile's first PACR computed, before Exp_section_size
     uint32_t packer_tpg_x[4];
     uint32_t packer_tpg_y[4];
     uint32_t packer_tpg_z[4];
@@ -600,6 +619,7 @@ void tensix_init(TensixState *p_tensix, uint32_t tile_id, uint32_t tensix_id);
 bool tensix_can_push_inst(TensixState *p_tensix, uint32_t pipe);
 bool tensix_thread_idle(const TensixState *p_tensix, uint32_t pipe);
 bool tensix_mop_expander_idle(const TensixState *p_tensix, uint32_t pipe);
+void tensix_frontend_step(TensixState *p_tensix, uint32_t pipe);
 void tensix_push_inst(TensixState *p_tensix, uint32_t pipe, uint32_t inst, bool bypass_mop_expander);
 uint32_t tensix_cfg_rd32(TensixState *p_tensix, uint32_t bank, uint32_t offset);
 void tensix_cfg_wr32(TensixState *p_tensix, uint32_t bank, uint32_t offset, uint32_t data);

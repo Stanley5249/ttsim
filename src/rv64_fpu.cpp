@@ -258,19 +258,9 @@ enum {
     RV_RMM = 4, // to nearest, ties to max magnitude
 };
 
-// RISC-V fflags bits.
-enum {
-    SF_NX = 1 << 0, // inexact
-    SF_UF = 1 << 1, // underflow
-    SF_OF = 1 << 2, // overflow
-    SF_DZ = 1 << 3, // divide by zero
-    SF_NV = 1 << 4, // invalid
-};
-
-template<class U, class U2, int TOT, int MB>
+template<class U, int TOT, int MB>
 struct SoftFloat {
     static constexpr int EB = TOT - 1 - MB;
-    static constexpr int BIAS = (1 << (EB - 1)) - 1;
     static constexpr U EMAXFIELD = (U(1) << EB) - 1;
     static constexpr U MMASK = (U(1) << MB) - 1;
     static constexpr U SIGN = U(1) << (TOT - 1);
@@ -281,155 +271,10 @@ struct SoftFloat {
     static bool is_snan(U a) { return is_nan(a) && !(a & (U(1) << (MB - 1))); }
     static bool is_inf(U a) { return ((a & (EMAXFIELD << MB)) == (EMAXFIELD << MB)) && !(a & MMASK); }
     static bool is_zero(U a) { return !(a & ~SIGN); }
-    static bool sign_of(U a) { return (a & SIGN) != 0; }
-
-    struct Unp {
-        bool sign;
-        int exp;
-        U2 mant;
-        bool zero;
-        bool inf;
-        bool nan;
-        bool snan;
-    };
-    static Unp unpack(U a) {
-        Unp u;
-        u.sign = sign_of(a);
-        U ef = (a >> MB) & EMAXFIELD;
-        U mf = a & MMASK;
-        u.nan = (ef == EMAXFIELD) && mf;
-        u.snan = u.nan && !(mf & (U(1) << (MB - 1)));
-        u.inf = (ef == EMAXFIELD) && !mf;
-        u.zero = (ef == 0) && !mf;
-        if (ef == 0) {
-            // Subnormal (or zero): normalize so the MSB sits at bit MB (like a normal significand)
-            // and lower the exponent to match, giving div/sqrt full quotient precision. Value-
-            // preserving, and add/mul use the actual MSB so they are unaffected.
-            u.exp = 1 - BIAS;
-            u.mant = mf;
-            if (mf != 0) {
-                int msb = 0;
-                {
-                    U2 t = mf;
-                    while (t >>= 1) {
-                        msb++;
-                    }
-                }
-                int sh = MB - msb;
-                u.mant = mf << sh;
-                u.exp -= sh;
-            }
-        } else {
-            u.exp = int(ef) - BIAS;
-            u.mant = mf | (U2(1) << MB); // normal (implicit bit)
-        }
-        return u;
-    }
-
-    // Convert this float to an integer; clamp on overflow/NaN and set NV. `bits` in {32,64}, signed/unsigned.
-    static uint64_t to_int(U a, uint32_t rm, uint32_t *fl, int bits, bool is_signed) {
-        // These are the result REGISTER values (32-bit W/WU results are sign-extended to 64 bits, per
-        // spec). For unsigned 32 that is 0xFFFFFFFF sign-extended = all-ones, NOT 0x00000000FFFFFFFF;
-        // the early NaN/Inf/overflow returns below use maxpos directly, so it must already be extended.
-        uint64_t maxpos = is_signed ? ((bits == 32) ? 0x7FFFFFFFull : 0x7FFFFFFFFFFFFFFFull)
-                                    : ((bits == 32) ? 0xFFFFFFFFFFFFFFFFull : 0xFFFFFFFFFFFFFFFFull);
-        uint64_t minneg = is_signed ? ((bits == 32) ? 0xFFFFFFFF80000000ull : 0x8000000000000000ull) : 0;
-        if (is_nan(a)) {
-            *fl |= SF_NV;
-            return maxpos;
-        }
-        bool sign = sign_of(a);
-        if (is_inf(a)) {
-            *fl |= SF_NV;
-            return sign ? minneg : maxpos;
-        }
-        Unp x = unpack(a);
-        if (x.zero) {
-            return 0;
-        }
-        int sh = x.exp - MB; // value = mant * 2^sh
-        uint64_t mant = uint64_t(x.mant);
-        uint64_t intval;
-        bool inexact = false;
-        if (sh >= 0) {
-            if (sh >= 64 || (mant != 0 && msb64(mant) + sh >= 64)) {
-                *fl |= SF_NV;
-                return sign ? minneg : maxpos;
-            }
-            intval = mant << sh;
-        } else {
-            int rs = -sh; // rs >= 1 here (sh < 0); value = mant * 2^-rs, all below the integer's LSB
-            uint64_t lost = (rs < 64) ? (mant & ((uint64_t(1) << rs) - 1)) : mant;
-            intval = (rs < 64) ? (mant >> rs) : 0;
-            inexact = lost != 0;
-            // Round the integer per rm using the discarded fraction. The half-ulp threshold is 2^(rs-1);
-            // when rs > 64 it exceeds any 64-bit `lost`, so the value is strictly below 0.5 and the
-            // nearest modes must NOT round up (the old `: 0` made half=0, rounding tiny values to 1).
-            uint64_t half = (rs <= 64) ? (uint64_t(1) << (rs - 1)) : ~uint64_t(0);
-            uint64_t frac = lost;
-            bool roundup = false;
-            switch (rm) {
-                case RV_RNE: roundup = (frac > half) || (frac == half && (intval & 1)); break;
-                case RV_RTZ: roundup = false; break;
-                case RV_RDN: roundup = sign && frac; break;
-                case RV_RUP: roundup = !sign && frac; break;
-                case RV_RMM: roundup = (frac >= half) && (half != 0); break;
-                default: roundup = (frac > half) || (frac == half && (intval & 1)); break;
-            }
-            if (roundup) {
-                intval++;
-            }
-        }
-        if (inexact) {
-            *fl |= SF_NX;
-        }
-        if (is_signed) {
-            // range check against signed bounds
-            uint64_t lim = (bits == 32) ? 0x80000000ull : 0x8000000000000000ull;
-            if (!sign && intval > lim - 1) {
-                *fl |= SF_NV;
-                return maxpos;
-            }
-            if (sign && intval > lim) {
-                *fl |= SF_NV;
-                return minneg;
-            }
-            uint64_t r = sign ? (~intval + 1) : intval;
-            if (bits == 32) { // sign-extend W result
-                r = uint64_t(int64_t(int32_t(uint32_t(r))));
-            }
-            return r;
-        } else {
-            if (sign) {
-                if (intval != 0) {
-                    *fl |= SF_NV;
-                    return 0;
-                }
-                return 0;
-            }
-            if (bits == 32 && intval > 0xFFFFFFFFull) {
-                *fl |= SF_NV;
-                return maxpos;
-            }
-            uint64_t r = intval;
-            if (bits == 32) { // FCVT.WU sign-extends per spec
-                r = uint64_t(int64_t(int32_t(uint32_t(r))));
-            }
-            return r;
-        }
-    }
-
-    static int msb64(uint64_t v) {
-        int m = 0;
-        while (v >>= 1) {
-            m++;
-        }
-        return m;
-    }
 };
 
-using SF32 = SoftFloat<uint32_t, uint64_t, 32, 23>;
-using SF64 = SoftFloat<uint64_t, unsigned __int128, 64, 52>;
+using SF32 = SoftFloat<uint32_t, 32, 23>;
+using SF64 = SoftFloat<uint64_t, 64, 52>;
 
 static const uint32_t F32_CANON_NAN = 0x7FC00000u;
 
@@ -670,12 +515,31 @@ static uint64_t hostfp_cvt_d_s(uint32_t f, uint32_t rm, uint32_t *fl) { // FCVT.
     return hostfp_result_d(r);
 }
 
-static uint64_t hostfp_to_int_s(uint32_t a, uint32_t rm, uint32_t *fl, int bits, bool sgn) {
-    return SF32::to_int(a, rm, fl, bits, sgn);
-}
-
-static uint64_t hostfp_to_int_d(uint64_t a, uint32_t rm, uint32_t *fl, int bits, bool sgn) {
-    return SF64::to_int(a, rm, fl, bits, sgn);
+// FCVT.{W,WU,L,LU}.{S,D}: a result in range raises NX when inexact, and one out of range (or a NaN) is clipped and
+// raises NV alone. Below 2^52 the value splits exactly into its truncation and a fraction that picks the rounding; from
+// 2^52 up it is an integer already. Each host operation is exact or truncates, so none depends on the rounding mode.
+template<class F> static uint64_t hostfp_to_int(F x, uint32_t rm, uint32_t *fl, int bits, bool is_signed) {
+    double r = x;
+    double frac = 0;
+    if ((r > -0x1p52) && (r < 0x1p52)) {
+        frac = r - double(int64_t(r));
+        r -= frac;
+        double mag = (frac < 0) ? -frac : frac;
+        bool away = (rm == RV_RNE) ? ((mag > 0.5) || ((mag == 0.5) && (int64_t(r) & 1)))
+                  : (rm == RV_RDN) ? (frac < 0) : (rm == RV_RUP) ? (frac > 0) : ((rm == RV_RMM) && (mag >= 0.5));
+        if (away) {
+            r += (frac < 0) ? -1.0 : 1.0;
+        }
+    }
+    double limit = is_signed ? ((bits == 32) ? 0x1p31 : 0x1p63) : ((bits == 32) ? 0x1p32 : 0x1p64);
+    if (!((r < limit) && (is_signed ? (r >= -limit) : (r > -1.0)))) { // a NaN fails both
+        *fl |= FFLAG_NV;
+        uint64_t sat = is_signed ? ((bits == 32) ? 0x7FFFFFFFull : 0x7FFFFFFFFFFFFFFFull) : ~0ull;
+        return (r < 0) ? ~sat : sat; // W and WU results are sign-extended
+    }
+    *fl |= (frac != 0) ? FFLAG_NX : 0;
+    uint64_t v = is_signed ? uint64_t(int64_t(r)) : uint64_t(r);
+    return (bits == 32) ? uint64_t(int64_t(int32_t(uint32_t(v)))) : v;
 }
 
 // The host can't round to nearest with ties away (RMM), so round |x| to P bits here; the conversion is then exact
@@ -882,8 +746,8 @@ void rv64_fpu_op(Rv64SysHartState *h, uint32_t inst) {
             bool sgn = !(r2 & 1);
             // Always run the conversion: rd=x0 suppresses only the integer writeback, NOT the fflags
             // side effects (NV/NX on invalid/overflow/inexact still update fcsr).
-            uint64_t iv = is_double ? hostfp_to_int_d(d64a, rm, &fl, bits, sgn)
-                                    : hostfp_to_int_s(s32a, rm, &fl, bits, sgn);
+            uint64_t iv = is_double ? hostfp_to_int(std::bit_cast<double>(d64a), rm, &fl, bits, sgn)
+                                    : hostfp_to_int(std::bit_cast<float>(s32a), rm, &fl, bits, sgn);
             if (r_dst) {
                 h->x_regs[r_dst] = iv;
             }

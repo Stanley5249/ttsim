@@ -726,6 +726,8 @@ template<class T, class T_SEXT> static void RV_XLEN_PREFIX(load)(RiscvHartState 
 
     uint_xlen_t addr = p_hart->x_regs[r_base] + imm;
     T value;
+    // Note: on WH, a load that overlaps a still-queued earlier store but doesn't start at the same address can pass
+    // it and return the old bytes (L1 and local memory alike; BH orders any overlap); not modeled
     if (!RV_XLEN_PREFIX(mem_rd)<T>(p_hart, addr, &value)) [[unlikely]] {
         p_hart->pc -= 4; // replay load to handle stall
         return;
