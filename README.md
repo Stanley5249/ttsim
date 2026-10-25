@@ -180,6 +180,9 @@ Build:
 ./make.py src/_out/release_riscv64/ttsim
 ```
 
+The released ttsim-riscv64 binaries are built on Ubuntu 24.04 and need glibc 2.38 or newer (Ubuntu 24.04 or
+later). On Ubuntu 22.04, build it from source as above.
+
 Boot Linux (OpenSBI `fw_jump` firmware + a kernel `Image` + initramfs + a flattened device tree), e.g.
 an 8-hart SMP boot with a virtio-blk disk and an interactive console:
 ```bash
