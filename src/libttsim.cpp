@@ -227,7 +227,24 @@ static bool t_tile_active(const TensixTile *p_tile) {
     return active;
 }
 
+#define PAUSE_CLOCKS 256 // a core that executes PAUSE sits out the clocks up to the next multiple of this
+
+static void resume_paused_cores() {
+    for (uint32_t tile_id = 0; tile_id < NUM_T_TILES; tile_id++) {
+        TensixTile *p_tile = &g_t_tiles[tile_id];
+        if (p_tile->rv32_cores_paused) {
+            p_tile->rv32_cores_active |= p_tile->rv32_cores_paused;
+            p_tile->rv32_cores_paused = 0;
+            ttsim_t_tile_set_busy(tile_id);
+        }
+    }
+    g_chip->t_tile_cores_paused = false;
+}
+
 static void clock_current_chip() {
+    if (g_chip->t_tile_cores_paused && !(g_clock % PAUSE_CLOCKS)) {
+        resume_paused_cores();
+    }
     // Idle tiles are skipped. The mask is reread after each tile, so a tile woken by a lower-numbered one is still
     // clocked this cycle.
     for (uint32_t tile_id = next_busy_t_tile(0); tile_id < NUM_T_TILES; tile_id = next_busy_t_tile(tile_id + 1)) {
@@ -273,7 +290,12 @@ static void clock_current_chip() {
         uint32_t tile_id = core_index / RV32_CORES_PER_E_TILE;
         uint32_t rv32_index = core_index % RV32_CORES_PER_E_TILE;
         auto *p_hart = &g_e_tiles[tile_id].rv32[rv32_index];
-        rv32_step(p_hart);
+        // Hack: for simulator perf, an eth core busy lately (its sram written to, or it issued a NOC or eth command)
+        // takes several steps per clock, so relayed traffic doesn't wait on it; an idle one takes one
+        uint32_t steps = (g_clock < g_e_tiles[tile_id].busy_until) ? ETH_BUSY_STEPS : 1;
+        for (uint32_t i = 0; (i < steps) && ((g_rv32_cores_active >> core_index) & 1); i++) {
+            rv32_step(p_hart);
+        }
     }
 }
 

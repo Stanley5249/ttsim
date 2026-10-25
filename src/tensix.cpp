@@ -797,16 +797,53 @@ static inline uint32_t dst32b_adjust_row(uint32_t row) {
     return ((row & 0x1F8) << 1) | (row & 0x207);
 }
 
-static inline uint32_t dst_valid_row(uint32_t row, bool use_dst32b) {
-    return use_dst32b ? dst32b_adjust_row(row) : row;
+static constexpr uint32_t DST32B_LO_ROW_OFFSET = 8;
+
+#if TT_ARCH_VERSION == 1
+// DEST_ACCESS_CFG (BH) changes where Dest datums are stored. remap_addrs rotates bits 3-5 of the row address of the
+// access's width (16-bit rows for 16-bit accesses, 32-bit rows for 32-bit ones); swizzle_32b rearranges 32-bit
+// datums across the two halves of each 16-bit row group. Both apply to every client that reads or writes datums
+// (FPU, SFPU, unpack to Dest, pack); the debug array read sees the storage as it is. dst[][] holds the storage as a
+// 16-bit access with both off sees it; these give the stored row for an access's row.
+static inline uint32_t dst_remap_row(uint32_t row) {
+    return (row & ~0x38u) | (((row >> 4) & 1) << 3) | (((row >> 5) & 1) << 4) | (((row >> 3) & 1) << 5);
 }
 
-static constexpr uint32_t DST32B_LO_ROW_OFFSET = 8;
+static inline uint32_t dst_stored_row16(const TensixState *p_tensix, uint32_t row) {
+    return p_tensix->DEST_ACCESS_CFG_remap_addrs ? dst_remap_row(row) : row;
+}
+
+// The stored row of a 32-bit datum's high half; its low half is DST32B_LO_ROW_OFFSET rows further on
+static inline uint32_t dst_stored_row32(const TensixState *p_tensix, uint32_t row) {
+    if (p_tensix->DEST_ACCESS_CFG_remap_addrs) {
+        row = dst_remap_row(row);
+    }
+    if (p_tensix->DEST_ACCESS_CFG_swizzle_32b) { // bit 9 passes through, as in dst32b_adjust_row
+        return (row & 0x203) | (((row >> 3) & 1) << 2) | ((((row >> 2) ^ (row >> 4)) & 1) << 4) |
+               (((row & 0x1FF) >> 4) << 5);
+    }
+    return dst32b_adjust_row(row);
+}
+#endif
+
+// The row of the valid flag an access's row uses. On BH remap_addrs moves it with the datum; swizzle_32b moves only the
+// datum.
+static inline uint32_t dst_valid_row(const TensixState *p_tensix, uint32_t row, bool use_dst32b) {
+#if TT_ARCH_VERSION == 1
+    row = dst_stored_row16(p_tensix, row);
+#endif
+    return use_dst32b ? dst32b_adjust_row(row) : row;
+}
 
 template<bool is_gmpool = false>
 static inline uint32_t read_dst32b(TensixState *p_tensix, uint32_t row, uint32_t col) {
     uint32_t adj_row = dst32b_adjust_row(row);
-    if (!p_tensix->dst_row_valid[adj_row]) {
+    uint32_t valid_row = adj_row;
+#if TT_ARCH_VERSION == 1
+    adj_row = dst_stored_row32(p_tensix, row);
+    valid_row = dst_valid_row(p_tensix, row, true);
+#endif
+    if (!p_tensix->dst_row_valid[valid_row]) {
         return is_gmpool ? 0xFFFFFFFF : 0;
     }
     return (uint32_t(p_tensix->dst[adj_row][col]) << 16) | p_tensix->dst[adj_row + DST32B_LO_ROW_OFFSET][col];
@@ -815,15 +852,23 @@ static inline uint32_t read_dst32b(TensixState *p_tensix, uint32_t row, uint32_t
 template<bool set_valid_on_last_column_only = false>
 static inline void write_dst32b(TensixState *p_tensix, uint32_t row, uint32_t col, uint32_t data) {
     uint32_t adj_row = dst32b_adjust_row(row);
+    uint32_t valid_row = adj_row;
+#if TT_ARCH_VERSION == 1
+    adj_row = dst_stored_row32(p_tensix, row);
+    valid_row = dst_valid_row(p_tensix, row, true);
+#endif
     p_tensix->dst[adj_row][col] = data >> 16;
     p_tensix->dst[adj_row + DST32B_LO_ROW_OFFSET][col] = data & 0xFFFF;
     if (!set_valid_on_last_column_only || (col == 15)) {
-        p_tensix->dst_row_valid[adj_row] = true;
+        p_tensix->dst_row_valid[valid_row] = true;
     }
 }
 
 template<bool is_gmpool = false>
 static inline uint16_t read_dst16b(TensixState *p_tensix, uint32_t row, uint32_t col) {
+#if TT_ARCH_VERSION == 1
+    row = dst_stored_row16(p_tensix, row); // remap_addrs moves the datum and its valid flag
+#endif
     if (!p_tensix->dst_row_valid[row]) {
         return is_gmpool ? 0xFFFF : 0;
     } else {
@@ -833,6 +878,9 @@ static inline uint16_t read_dst16b(TensixState *p_tensix, uint32_t row, uint32_t
 
 template<bool set_valid_on_last_column_only = false>
 static inline void write_dst16b(TensixState *p_tensix, uint32_t row, uint32_t col, uint16_t data) {
+#if TT_ARCH_VERSION == 1
+    row = dst_stored_row16(p_tensix, row); // remap_addrs moves the datum and its valid flag
+#endif
     p_tensix->dst[row][col] = data;
     if (!set_valid_on_last_column_only || (col == 15)) {
         p_tensix->dst_row_valid[row] = true;
@@ -1166,7 +1214,8 @@ TENSIX_EXECUTE_ZEROACC() {
                 p_tensix->dst_row_valid[dst] = false;
             }
 #else
-            p_tensix->dst_row_valid[dst] = false; // the width is use_32_bit_mode's (clear_mode 4), not the accumulator's
+            // the width is use_32_bit_mode's (clear_mode 4), not the accumulator's
+            p_tensix->dst_row_valid[dst_valid_row(p_tensix, dst, false)] = false;
 #endif
             break;
         case 1: // clear 16 rows
@@ -1177,7 +1226,7 @@ TENSIX_EXECUTE_ZEROACC() {
 #endif
             TTSIM_VERIFY(dst < DST_ROWS / 16, NonContractualBehavior, "clear 16 rows: dst=%d", dst);
             for (uint32_t row = 0; row < 16; row++) {
-                p_tensix->dst_row_valid[dst*16 + row] = false;
+                p_tensix->dst_row_valid[dst_valid_row(p_tensix, dst * 16 + row, false)] = false;
             }
             break;
 #if TT_ARCH_VERSION == 1
@@ -1189,11 +1238,11 @@ TENSIX_EXECUTE_ZEROACC() {
             if (clear_zero_flags) { // validate that the HW bug workaround is not being used in a dangerous way
                 for (uint32_t row = 0; row < 16; row++) {
                     // would have liked to enforce that it's already true, but this is not realistic in all sub-tile cases
-                    p_tensix->dst_row_valid[dst*32 + (row & 8)*2 + (row & 7)] = true;
+                    p_tensix->dst_row_valid[dst_valid_row(p_tensix, dst * 16 + row, true)] = true;
                 }
             } else {
                 for (uint32_t row = 0; row < 16; row++) {
-                    p_tensix->dst_row_valid[dst*32 + (row & 8)*2 + (row & 7)] = false;
+                    p_tensix->dst_row_valid[dst_valid_row(p_tensix, dst * 16 + row, true)] = false;
                 }
             }
             break;
@@ -1703,7 +1752,8 @@ static inline int32_t saturate_add_int32(int32_t x, int32_t y) {
 }
 
 template<bool is_gapool, bool broadcast = false>
-static bool tensix_matmul_op(TensixState *p_tensix, uint32_t pipe, uint32_t dst, uint32_t addr_mode, uint32_t clear_dvalid) {
+static bool tensix_matmul_op(TensixState *p_tensix, uint32_t pipe, uint32_t dst, uint32_t addr_mode, uint32_t clear_dvalid,
+    uint32_t src_a_offset = 0, uint32_t src_b_offset = 0) {
     static_assert(!is_gapool || !broadcast);
     if (is_gapool) {
         TTSIM_VERIFY(!(dst & 3), UnsupportedFunctionality, "dst=%d", dst);
@@ -1741,8 +1791,8 @@ static bool tensix_matmul_op(TensixState *p_tensix, uint32_t pipe, uint32_t dst,
     bool flush_denormals = !p_config->ALU_ACC_CTRL_Zero_Flag_disabled_src;
     TTSIM_VERIFY(flush_denormals, UnsupportedFunctionality, "ALU_ACC_CTRL_Zero_Flag_disabled_src=1 (keep SrcB denormals) not modeled");
 
-    uint32_t src_a_row = math_src_rwc(p_tensix->src_a_rwc[pipe]);
-    uint32_t src_b_row = math_src_rwc(p_tensix->src_b_rwc[pipe]);
+    uint32_t src_a_row = math_src_rwc(p_tensix->src_a_rwc[pipe] + src_a_offset);
+    uint32_t src_b_row = math_src_rwc(p_tensix->src_b_rwc[pipe] + src_b_offset);
     uint32_t dst_row = p_tensix->dst_rwc[pipe] + dst + math_dest_offset(p_tensix, p_config, pipe);
     // Note: DEST_REGW_BASE_Base (cfg6) is not instantiated and errors on write; always 0
     dst_row &= DST_ROWS - 1;
@@ -1757,7 +1807,7 @@ static bool tensix_matmul_op(TensixState *p_tensix, uint32_t pipe, uint32_t dst,
         TTSIM_VERIFY(!(src_b_row & 7) && (src_b_row < SRC_ROWS), UnsupportedFunctionality, "src_b_row=%d", src_b_row);
         TTSIM_VERIFY(!(dst_row & (N_ROWS - 1)), UnimplementedFunctionality, "dst_row=%d", dst_row);
     }
-    uint32_t unflagged_row = broadcast ? dst_valid_row(dst_row + 2, use_dst32b) : 0;
+    uint32_t unflagged_row = broadcast ? dst_valid_row(p_tensix, dst_row + 2, use_dst32b) : 0;
     bool unflagged_row_valid = p_tensix->dst_row_valid[unflagged_row];
     uint32_t fidelity_phase = (p_tensix->fidelity[pipe] + math_fidelity_base(p_tensix, pipe)) & 3;
     bool fp_exponent_8b = (src_a_fmt != 1) && (src_a_fmt != 10) && !is_int8;
@@ -1862,8 +1912,8 @@ static bool tensix_matmul_op(TensixState *p_tensix, uint32_t pipe, uint32_t dst,
     }
     if (broadcast) {
         p_tensix->dst_row_valid[unflagged_row] = unflagged_row_valid;
-        p_tensix->dst_row_valid[dst_valid_row((dst_row ^ 1) + 4, use_dst32b)] = true;
-        p_tensix->dst_row_valid[dst_valid_row((dst_row ^ 1) + 6, use_dst32b)] = true;
+        p_tensix->dst_row_valid[dst_valid_row(p_tensix, (dst_row ^ 1) + 4, use_dst32b)] = true;
+        p_tensix->dst_row_valid[dst_valid_row(p_tensix, (dst_row ^ 1) + 6, use_dst32b)] = true;
     }
     math_update_counters(p_tensix, pipe, addr_mode, true);
     math_clear_src_valid(p_tensix, pipe, clear_dvalid);
@@ -2312,17 +2362,20 @@ TENSIX_EXECUTE_PACR() {
     TTSIM_VERIFY(!row_pad_zero, UnsupportedFunctionality, "row_pad_zero=%d", row_pad_zero);
     TTSIM_VERIFY(!cfg_context, UnsupportedFunctionality, "cfg_context=%d", cfg_context);
 
-    // We currently require strided mode to be tied to the swizzle_32b and remap_addrs features
-    if (dst_access_mode) {
-        TTSIM_VERIFY(p_tensix->DEST_ACCESS_CFG_swizzle_32b, UnimplementedFunctionality,
-            "dst_access_mode=%d swizzle_32b=%d", dst_access_mode, p_tensix->DEST_ACCESS_CFG_swizzle_32b);
-        TTSIM_VERIFY(p_tensix->DEST_ACCESS_CFG_remap_addrs, UnimplementedFunctionality,
-            "dst_access_mode=%d remap_addrs=%d", dst_access_mode, p_tensix->DEST_ACCESS_CFG_remap_addrs);
-    }
+    // Read interface j reads the Dest row whose interface position is j: bits 1:0 of the row, or in strided mode
+    // (dst_access_mode) bits 4:3 of its address after remap_addrs, so the interfaces' rows are 8 rows apart in storage
+    // and 16 rows apart before a remap
+    uint32_t intf_shift = !dst_access_mode ? 0 : p_tensix->DEST_ACCESS_CFG_remap_addrs ? 4 : 3;
 #endif
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
     const TensixConfigState *p_config = &p_tensix->config[state_id];
+#if TT_ARCH_VERSION == 1
+    // A 32-bit strided read relies on the swizzle_32b layout: without it the hardware reads the wrong rows
+    TTSIM_VERIFY(!dst_access_mode || !p_config->PCK_DEST_RD_CTRL_Read_32b_data || p_tensix->DEST_ACCESS_CFG_swizzle_32b,
+        UnsupportedFunctionality, "dst_access_mode=%d with Read_32b_data and swizzle_32b=%d", dst_access_mode,
+        p_tensix->DEST_ACCESS_CFG_swizzle_32b);
+#endif
     // Note: on WH, PCK_EDGE_TILE_FACE_SET_SELECT_enable (cfg15) is not instantiated and errors on write; always 0
     uint32_t tile_row_set_mapping[2][16] = { // XXX This is clunky/slow relative to using a shift, but that requires us to hardcode cfg reg nums?
         {
@@ -2417,7 +2470,13 @@ TENSIX_EXECUTE_PACR() {
     PACK_VERIFY_THCON0(Disable_pack_zero_flags);
 #undef PACK_VERIFY_THCON0
 
+#if TT_ARCH_VERSION == 1
+    // Blackhole's packer doesn't read ALU_FORMAT_SPEC_REG2_Dstacc: it reads Dest in In_data_format (or in
+    // Dstacc_val with Dstacc_override, which is refused)
+    uint32_t intermediate_format = p_config->THCON_SEC0_REG1_In_data_format;
+#else
     uint32_t intermediate_format = p_config->ALU_FORMAT_SPEC_REG2_Dstacc;
+#endif
     uint32_t pack_src_format = p_config->THCON_SEC0_REG1_In_data_format;
     uint32_t pack_dst_format = p_config->THCON_SEC0_REG1_Out_data_format;
 #if TT_ARCH_VERSION == 0
@@ -2558,12 +2617,14 @@ TENSIX_EXECUTE_PACR() {
 #endif
         }
         pack_row &= DST_ROWS - 1;
-        TTSIM_VERIFY(pack_row + ((count + ROW_SIZE - 1) / ROW_SIZE) <= DST_ROWS, UnimplementedFunctionality, "pack_row=%d count=%d", pack_row, count);
 #if TT_ARCH_VERSION == 1
-        if (!dst_access_mode) { // the read interfaces' rows must lie within a 4-row aligned group
-            TTSIM_VERIFY((read_intf_sel << (pack_row & 3)) <= 15, UndefinedBehavior,
-                "read_intf_sel=%d with pack_row=%d", read_intf_sel, pack_row);
-        }
+        // the read interfaces' rows must lie within one group of four interface positions
+        TTSIM_VERIFY((read_intf_sel << ((pack_row >> intf_shift) & 3)) <= 15, UndefinedBehavior,
+            "read_intf_sel=%d with pack_row=%d dst_access_mode=%d", read_intf_sel, pack_row, dst_access_mode);
+        TTSIM_VERIFY(dst_access_mode || (pack_row + ((count + ROW_SIZE - 1) / ROW_SIZE) <= DST_ROWS),
+            UnimplementedFunctionality, "pack_row=%d count=%d", pack_row, count);
+#else
+        TTSIM_VERIFY(pack_row + ((count + ROW_SIZE - 1) / ROW_SIZE) <= DST_ROWS, UnimplementedFunctionality, "pack_row=%d count=%d", pack_row, count);
 #endif
         // A BFP tile takes part of its L1 placement from a later PACR when its address inputs change while it is
         // open: on BH the whole tile moves (within its first four Dst rows), on WH its exponents do. A Flush may
@@ -2650,17 +2711,11 @@ TENSIX_EXECUTE_PACR() {
             if (edge_mask & (1 << col)) {
                 uint32_t row = pack_row + i / ROW_SIZE;
 #if TT_ARCH_VERSION == 1
-                if (dst_access_mode) {
-                    TTSIM_VERIFY((read_intf_sel == 1) || (read_intf_sel == 3) || (read_intf_sel == 15), UnimplementedFunctionality,
-                        "dst_access_mode=%d read_intf_sel=%d", dst_access_mode, read_intf_sel);
-                    row = pack_row + 16*(i / ROW_SIZE); // remap and swizzle cause stride to be 16 rows and not 8 here
-                } else {
-                    if (read_intf_sel == 5) {
-                        row = pack_row + 2*(i / ROW_SIZE);
-                    } else if (read_intf_sel == 10) {
-                        row = pack_row + 2*(i / ROW_SIZE) + 1;
-                    }
+                uint32_t intf_mask = read_intf_sel; // the read interface of row i / ROW_SIZE: its enabled one in order
+                for (uint32_t k = i / ROW_SIZE; k; k--) {
+                    intf_mask &= intf_mask - 1;
                 }
+                row = pack_row + (__builtin_ctz(intf_mask) << intf_shift);
 #endif
                 bool read_raw = p_config->PCK_DEST_RD_CTRL_Read_int8;
                 bool read_unsigned = p_config->PCK_DEST_RD_CTRL_Read_unsigned;
@@ -5462,8 +5517,10 @@ TENSIX_EXECUTE_SEMINIT() {
     TTSIM_VERIFY(__builtin_popcount(sem_sel) == 1, UnsupportedFunctionality, "sem_sel=0x%x is not one-hot", sem_sel);
     uint32_t sem_index = __builtin_ctz(sem_sel);
     TTSIM_VERIFY(sem_index < std::size(p_tensix->sem), AssertionFailure, "sem_index=%d out of range", sem_index);
-    TTSIM_VERIFY(!(p_tensix->wait_block[pipe] && (sem_sel & p_tensix->wait_sems[pipe])), UndefinedBehavior,
-        "sem_sel=0x%x: may pass this thread's SEMWAIT on it, whose block mask 0x%x lacks B1", sem_sel, p_tensix->wait_block[pipe]);
+    // A SEMWAIT on this semaphore, block mask without B1, may still be latched: on Wormhole and Blackhole it is
+    // evaluated before this change, in program order (likewise in SEMPOST and SEMGET)
+    TTSIM_VERIFY(!(p_tensix->wait_block[pipe] && (sem_sel & p_tensix->wait_sems[pipe])), NonContractualBehavior,
+        "sem_sel=0x%x: after this thread's SEMWAIT on it, whose block mask 0x%x lacks B1", sem_sel, p_tensix->wait_block[pipe]);
     TTSIM_VERIFY(init_value <= max_value, NonContractualBehavior, "init_value=%d is greater than max_value=%d", init_value, max_value);
 
     p_tensix->sem[sem_index] = init_value;
@@ -5475,8 +5532,8 @@ TENSIX_EXECUTE_SEMPOST() {
     TTSIM_VERIFY(__builtin_popcount(sem_sel) == 1, UnsupportedFunctionality, "sem_sel=0x%x is not one-hot", sem_sel);
     uint32_t sem_index = __builtin_ctz(sem_sel);
     TTSIM_VERIFY(sem_index < std::size(p_tensix->sem), AssertionFailure, "sem_index=%d out of range", sem_index);
-    TTSIM_VERIFY(!(p_tensix->wait_block[pipe] && (sem_sel & p_tensix->wait_sems[pipe])), UndefinedBehavior,
-        "sem_sel=0x%x: may pass this thread's SEMWAIT on it, whose block mask 0x%x lacks B1", sem_sel, p_tensix->wait_block[pipe]);
+    TTSIM_VERIFY(!(p_tensix->wait_block[pipe] && (sem_sel & p_tensix->wait_sems[pipe])), NonContractualBehavior,
+        "sem_sel=0x%x: after this thread's SEMWAIT on it, whose block mask 0x%x lacks B1", sem_sel, p_tensix->wait_block[pipe]);
 
     TTSIM_VERIFY(p_tensix->sem[sem_index] < p_tensix->sem_max[sem_index], NonContractualBehavior,
         "sem=%d sem_max=%d", p_tensix->sem[sem_index], p_tensix->sem_max[sem_index]);
@@ -5488,8 +5545,8 @@ TENSIX_EXECUTE_SEMGET() {
     TTSIM_VERIFY(__builtin_popcount(sem_sel) == 1, UnsupportedFunctionality, "sem_sel=0x%x is not one-hot", sem_sel);
     uint32_t sem_index = __builtin_ctz(sem_sel);
     TTSIM_VERIFY(sem_index < std::size(p_tensix->sem), AssertionFailure, "sem_index=%d out of range", sem_index);
-    TTSIM_VERIFY(!(p_tensix->wait_block[pipe] && (sem_sel & p_tensix->wait_sems[pipe])), UndefinedBehavior,
-        "sem_sel=0x%x: may pass this thread's SEMWAIT on it, whose block mask 0x%x lacks B1", sem_sel, p_tensix->wait_block[pipe]);
+    TTSIM_VERIFY(!(p_tensix->wait_block[pipe] && (sem_sel & p_tensix->wait_sems[pipe])), NonContractualBehavior,
+        "sem_sel=0x%x: after this thread's SEMWAIT on it, whose block mask 0x%x lacks B1", sem_sel, p_tensix->wait_block[pipe]);
 
     TTSIM_VERIFY(p_tensix->sem[sem_index], NonContractualBehavior, "sem=%d sem_max=%d", p_tensix->sem[sem_index], p_tensix->sem_max[sem_index]);
     p_tensix->sem[sem_index]--;

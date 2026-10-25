@@ -950,6 +950,13 @@
           "name": "niu_mst_rd_resp_received"
         },
         {
+          "offset": "0x20C",
+          "rw": "ro",
+          "reset_value": "0x00000000",
+          "name": "niu_mst_rd_data_word_received",
+          "unsupported": true
+        },
+        {
           "offset": "0x21C",
           "rw": "ro",
           "reset_value": "0x00000000",

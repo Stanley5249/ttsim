@@ -65,7 +65,8 @@ void ttsim_exit() {
 
 bool ttsim_rv32_get_core_active(char tile_type, uint32_t tile_id, uint32_t rv32_id) {
     if (tile_type == 'T') {
-        return ((g_t_tiles[tile_id].rv32_cores_active | g_t_tiles[tile_id].rv32_cores_parked) >> rv32_id) & 1;
+        const TensixTile *p_tile = &g_t_tiles[tile_id];
+        return ((p_tile->rv32_cores_active | p_tile->rv32_cores_parked | p_tile->rv32_cores_paused) >> rv32_id) & 1;
     } else {
         TTSIM_VERIFY(tile_type == 'E', AssertionFailure, "tile_type=%c", tile_type);
         uint32_t core_index = tile_id * RV32_CORES_PER_E_TILE + rv32_id;
@@ -81,6 +82,7 @@ void ttsim_rv32_set_core_active(char tile_type, uint32_t tile_id, uint32_t rv32_
         } else {
             g_t_tiles[tile_id].rv32_cores_active &= ~(1 << rv32_id);
             g_t_tiles[tile_id].rv32_cores_parked &= ~(1 << rv32_id);
+            g_t_tiles[tile_id].rv32_cores_paused &= ~(1 << rv32_id);
         }
     } else {
         TTSIM_VERIFY(tile_type == 'E', AssertionFailure, "tile_type=%c", tile_type);

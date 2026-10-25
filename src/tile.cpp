@@ -1239,6 +1239,8 @@ static uint32_t base_noc_regs_rd32(const BaseTile *p_tile, char tile_type, uint3
         case NOC_REGS_NOC_ID_TRANSLATE_COL_MASK: return p_tile->noc_id_translate_col_mask[noc_instance];
         case NOC_REGS_NOC_ID_TRANSLATE_ROW_MASK: return p_tile->noc_id_translate_row_mask[noc_instance];
 #endif
+        case NOC_REGS_NIU_MST_RD_DATA_WORD_RECEIVED:
+            TTSIM_ERROR(UnsupportedFunctionality, "NIU_MST_RD_DATA_WORD_RECEIVED");
         default:
             TTSIM_ERROR(UnimplementedFunctionality, "tile_type=%c tile_id=%d offset=0x%x", tile_type, tile_id, offset);
     }
@@ -1416,7 +1418,10 @@ static void noc_cmd_ctrl(uint32_t tile_id, uint32_t noc_instance, uint32_t cmd_b
         TTSIM_VERIFY((!bits<0,0>(noc_ctrl)), UnimplementedFunctionality, "multicast atomics");
         TTSIM_VERIFY((bits<1,1>(noc_ctrl)), UnsupportedFunctionality, "multicast reads");
         TTSIM_VERIFY((!bits<3,3>(noc_ctrl)), UnimplementedFunctionality, "multicast inline writes");
+#if TT_ARCH_VERSION == 0
         TTSIM_VERIFY((bits<8,8>(noc_ctrl)), UnimplementedFunctionality, "multicast must use path reserve");
+#endif
+        // Note: two multicasts without path reservation on one VC whose trees share a link can deadlock; not checked
     } else {
         TTSIM_VERIFY((!bits<8,8>(noc_ctrl)), UnimplementedFunctionality, "unicast must not use path reserve");
         TTSIM_VERIFY((!bits<17,17>(noc_ctrl)), UnimplementedFunctionality, "unicast must not use broadcast src_include");
@@ -1705,6 +1710,9 @@ static void noc_regs_wr32(uint32_t tile_id, uint32_t noc_instance, uint32_t offs
         case NOC_REGS_NOC_CMD_CTRL(2):
         case NOC_REGS_NOC_CMD_CTRL(3):
             TTSIM_VERIFY(data == 1, UnimplementedFunctionality, "noc_cmd_ctrl[%d] data=0x%x", cmd_buf, data);
+            if constexpr (tile_type == 'E') {
+                eth_set_busy(p_tile);
+            }
             noc_cmd_ctrl<tile_type>(tile_id, noc_instance, cmd_buf);
             break;
         case NOC_REGS_NOC_CLEAR_OUTSTANDING_REQ_CNT:
@@ -1827,17 +1835,15 @@ static void tensix_mop_cfg_wr32(uint32_t tile_id, uint32_t riscv_id, uint32_t of
     }
 }
 
-// BRISC's window also holds threads 1 and 2's GPRs at offsets 0x100 and 0x200 (address bits 9:8 pick the thread);
-// those are legal accesses, not modeled.
-static void tensix_regfile_check_brisc(uint32_t riscv_id, uint32_t offset) {
-    TTSIM_VERIFY((riscv_id != RV32_ID_BRISC) || (offset < 0x100) || (offset >= 0x300), UnsupportedFunctionality,
-        "BRISC access to thread %d GPRs, offset=0x%x", offset >> 8, offset);
-}
-
 static uint32_t tensix_regfile_rd32(uint32_t tile_id, uint32_t riscv_id, uint32_t offset) {
     TensixTile *p_tile = &g_t_tiles[tile_id];
-    tensix_regfile_check_brisc(riscv_id, offset);
-    riscv_id = (riscv_id == RV32_ID_BRISC) ? RV32_ID_TRISC0 : riscv_id;
+    // BRISC's window holds all three threads' GPRs, thread t's at offset 0x100 * t. Nothing orders the read against a
+    // Tensix instruction still in flight that writes the GPR: it returns the old value or the new one.
+    if (riscv_id == RV32_ID_BRISC) {
+        TTSIM_VERIFY(offset < 0x300, UndefinedBehavior, "offset=0x%x", offset);
+        riscv_id = RV32_ID_TRISC0 + (offset >> 8);
+        offset &= 0xFF;
+    }
     auto [tensix_id, pipe] = trisc_pipe(riscv_id);
     TTSIM_VERIFY(!(offset & 3), AssertionFailure, "misaligned offset=0x%x", offset);
     switch (offset / 4) {
@@ -1850,7 +1856,10 @@ static uint32_t tensix_regfile_rd32(uint32_t tile_id, uint32_t riscv_id, uint32_
 
 static void tensix_regfile_wr32(uint32_t tile_id, uint32_t riscv_id, uint32_t offset, uint32_t data) {
     TensixTile *p_tile = &g_t_tiles[tile_id];
-    tensix_regfile_check_brisc(riscv_id, offset);
+    // BRISC's window also holds threads 1 and 2's GPRs (address bits 9:8 pick the thread); its writes there are legal,
+    // not modeled.
+    TTSIM_VERIFY((riscv_id != RV32_ID_BRISC) || (offset < 0x100) || (offset >= 0x300), UnsupportedFunctionality,
+        "BRISC write to thread %d GPRs, offset=0x%x", offset >> 8, offset);
     riscv_id = (riscv_id == RV32_ID_BRISC) ? RV32_ID_TRISC0 : riscv_id;
     auto [tensix_id, pipe] = trisc_pipe(riscv_id);
     TTSIM_VERIFY(!(offset & 3), AssertionFailure, "misaligned offset=0x%x", offset);
@@ -1993,6 +2002,7 @@ static void eth_txq_regs_wr32(uint32_t tile_id, uint32_t offset, uint32_t data) 
             break;
 #endif
         case ETH_TXQ_CMD:
+            eth_set_busy(p_tile);
 #if TT_ARCH_VERSION == 0
             TTSIM_VERIFY(!p_tile->eth_txq_cmd[queue_id], UnimplementedFunctionality, "eth_txq_cmd=0x%x", p_tile->eth_txq_cmd[queue_id]);
             TTSIM_VERIFY(p_tile->erisc_mac_0 == 0x30000001, UnimplementedFunctionality, "ERISC_MAC_0=0x%x", p_tile->erisc_mac_0);
@@ -2018,6 +2028,7 @@ static void eth_txq_regs_wr32(uint32_t tile_id, uint32_t offset, uint32_t data) 
                 // eth_send_packet (ETH_TXQ_CMD_START_DATA): copy local L1 to the peer eth tile's L1
                 uint32_t saved_chip_id = g_current_chip_id;
                 ttsim_select_chip(remote_chip_id);
+                eth_set_busy(&g_e_tiles[remote_tile_id]);
                 memcpy(&g_e_tiles[remote_tile_id].sram[dest_addr], &p_tile->sram[start_addr], size_bytes);
                 ttsim_select_chip(saved_chip_id);
                 p_tile->eth_txq_cmd[queue_id] = 0;
@@ -2847,6 +2858,7 @@ void tile_wr_bytes(uint32_t coord, uint64_t addr, const void *p, uint32_t size) 
                 TTSIM_VERIFY(data == 0xCA110002, UnsupportedFunctionality, "ETH_MAILBOX data=0x%x", data);
             }
 #endif
+            eth_set_busy(&g_e_tiles[tile_id]);
             memcpy(&g_e_tiles[tile_id].sram[addr], p, size);
             return;
         }

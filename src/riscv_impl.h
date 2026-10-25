@@ -1063,8 +1063,24 @@ template<class branch_op> static void RV_XLEN_PREFIX(branch)(RiscvHartState *p_h
     }
 }
 
+#if (XLEN == 32)
+// A T tile core that executes PAUSE is waiting for another agent, so it sits out a few clocks, which only delays it
+static void RV_XLEN_PREFIX(pause)(RiscvHartState *p_hart) {
+    if (p_hart->tile_type == 'T') {
+        TensixTile *p_tile = &g_t_tiles[p_hart->tile_id];
+        p_tile->rv32_cores_active &= ~(1 << p_hart->riscv_id);
+        p_tile->rv32_cores_paused |= 1 << p_hart->riscv_id;
+        g_chip->t_tile_cores_paused = true;
+    }
+}
+#endif
+
 static void RV_XLEN_PREFIX(fence)(RiscvHartState *p_hart, uint32_t inst) {
 #if TT_ARCH_VERSION == 0
+    if (inst == 0x0100000F) { // PAUSE, which promises no ordering
+        RV_XLEN_PREFIX(pause)(p_hart);
+        return;
+    }
     TTSIM_ERROR(UnsupportedFunctionality, "fence instructions do not enforce memory ordering on Wormhole and should not be used");
 #elif TTSIM_RV64_SYSTEM
     // Any FENCE other than PAUSE is currently a NOP
@@ -1078,9 +1094,12 @@ static void RV_XLEN_PREFIX(fence)(RiscvHartState *p_hart, uint32_t inst) {
     TTSIM_VERIFY(!r_src, UnsupportedFunctionality, "r_src=%d", r_src);
     uint32_t fence_mode = bits<31,20>(inst); // concatenation of many different fence bits
 
-    // For future reference: PAUSE instruction appears to be 0x0100000F, i.e., fence_mode == 0x010
-    // This is probably a safe NOP on silicon, but don't know for sure and don't know its performance
-    // Can generate it via __builtin_riscv_pause()
+#if TT_ARCH_VERSION == 1
+    if (fence_mode == 0x010) { // PAUSE, a fence like the others on Blackhole
+        RV_XLEN_PREFIX(pause)(p_hart);
+        return dcache_invalidate(p_hart);
+    }
+#endif
     if ((fence_mode == 0x011) || (fence_mode == 0x023) || (fence_mode == 0x031) || (fence_mode == 0x033) ||
         (fence_mode == 0x0FF)) {
 #if XLEN == 32

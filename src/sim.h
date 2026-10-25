@@ -342,6 +342,7 @@ struct TensixTile {
     BaseTile base;
     uint32_t rv32_cores_active;
     uint32_t rv32_cores_parked; // out of reset, but stalled on a read only a reset can end, so not stepped
+    uint32_t rv32_cores_paused; // executed PAUSE, so not stepped until the next multiple of PAUSE_CLOCKS
 #if RV64_CORES_PER_T_TILE
     uint32_t rv64_cores_active;
 #endif
@@ -398,11 +399,17 @@ struct TensixTile {
     uint32_t ncrisc_reset_pc_override;
 };
 
+// An eth core that was sent work or started some in the last ETH_BUSY_CLOCKS clocks takes ETH_BUSY_STEPS steps per
+// clock (libttsim.cpp)
+constexpr uint64_t ETH_BUSY_CLOCKS = 1024;
+constexpr uint32_t ETH_BUSY_STEPS = 16;
+
 struct EthTile {
     BaseTile base;
     uint8_t sram[ETH_SRAM_SIZE];
     Rv32HartState rv32[RV32_CORES_PER_E_TILE];
     uint8_t rv32_local_ram[RV32_CORES_PER_E_TILE][ERISC_LOCAL_MEM_SIZE];
+    uint64_t busy_until; // g_clock until which the cores take several steps per clock (eth_set_busy)
 #if TT_ARCH_VERSION == 0
     uint8_t erisc_iram[RV32_IRAM_SIZE];
     uint32_t erisc_iram_load;
@@ -574,6 +581,7 @@ struct ChipState {
     DramChannel dram[NUM_DRAM_CHANNELS];
     uint64_t rv32_cores_active;
     uint64_t t_tiles_busy[(NUM_T_TILES + 63) / 64]; // T tiles that may have a core or Tensix pipe active
+    bool t_tile_cores_paused; // some T tile has a core in rv32_cores_paused
 };
 
 // The chip count is known only to sim.cpp, so every other file builds once for all configurations.
@@ -596,6 +604,11 @@ extern uint64_t g_clock;
 // Called whenever a T tile's core or Tensix pipe becomes active, so the clock loop visits it
 static inline void ttsim_t_tile_set_busy(uint32_t tile_id) {
     g_t_tiles_busy[tile_id / 64] |= 1ull << (tile_id % 64);
+}
+
+// Called on each write to an E tile's sram and each NOC or eth command its cores issue
+static inline void eth_set_busy(EthTile *p_tile) {
+    p_tile->busy_until = g_clock + ETH_BUSY_CLOCKS;
 }
 
 void libttsim_pci_dma_mem_rd_bytes(uint64_t paddr, void *p, uint32_t size);
