@@ -9,6 +9,9 @@
 uint32_t g_current_chip_id;
 uint64_t g_clock;
 ChipState g_chips[NUM_CHIPS];
+uint64_t g_wall_clock;
+uint32_t g_wall_step;
+uint32_t g_wall_steps_max;
 
 uint64_t ttsim_get_clock() {
     return g_clock;
