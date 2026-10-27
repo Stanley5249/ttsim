@@ -1,0 +1,87 @@
+# Builds the simulator libraries from a tag and publishes them as a GitHub Release, named like the upstream assets
+# (libttsim_wh.so, libttsim_wh_aarch64.so, ...), so tools that download upstream releases can point at this repo.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release, such as v1.15.0-steps.1"
+        required: true
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            suffix: ""
+          - runner: ubuntu-24.04-arm
+            suffix: _aarch64
+    env:
+      TAG: ${{ inputs.tag }}
+      SUFFIX: ${{ matrix.suffix }}
+    steps:
+    - name: Checkout Tag
+      uses: actions/checkout@v6
+      with:
+        ref: refs/tags/${{ inputs.tag }}
+        persist-credentials: false
+
+    - name: Check the Wall Clock Change
+      run: |
+        grep -q 'g_wall_clock + g_wall_step' src/tile.cpp
+
+    - name: Build Simulator
+      run: |
+        ./make.py :build
+
+    - name: Collect Libraries
+      run: |
+        mkdir dist
+        for dir in src/_out/release_*/; do
+          variant=$(basename "$dir")
+          variant=${variant#release_}
+          [ -f "$dir/libttsim.so" ] || continue
+          cp "$dir/libttsim.so" "dist/libttsim_${variant}${SUFFIX}.so"
+        done
+        sha256sum dist/*
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: libs${{ matrix.suffix }}
+        path: dist/
+        if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        path: dist
+        merge-multiple: true
+
+    - name: Publish Release
+      run: |
+        commit=$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)
+        {
+          echo "Built by the Release workflow from \`$TAG\` (\`$commit\`), run $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID."
+          echo
+          echo '```text'
+          (cd dist && sha256sum -- *)
+          echo '```'
+        } > notes.md
+        gh release create "$TAG" dist/* --verify-tag --title "$TAG" --notes-file notes.md
