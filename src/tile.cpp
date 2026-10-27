@@ -1031,9 +1031,9 @@ static uint32_t riscv_debug_regs_rd32(uint32_t tile_id, uint32_t tensix_id, uint
             }
             TTSIM_ERROR(UnsupportedFunctionality, "TENSIX_CREG_RDDATA in eth tile");
         case RISCV_DEBUG_REGS_SOFT_RESET_0: return p_tile->soft_reset_0;
-        case RISCV_DEBUG_REGS_WALL_CLOCK_0: return uint32_t(g_clock);
-        case RISCV_DEBUG_REGS_WALL_CLOCK_1: return uint32_t(g_clock >> 32); // high part, unlatched
-        case RISCV_DEBUG_REGS_WALL_CLOCK_1_AT: return uint32_t(g_clock >> 32); // XXX add the latching behavior on this reg
+        case RISCV_DEBUG_REGS_WALL_CLOCK_0: return uint32_t(g_wall_clock + g_wall_step);
+        case RISCV_DEBUG_REGS_WALL_CLOCK_1: return uint32_t((g_wall_clock + g_wall_step) >> 32); // high part, unlatched
+        case RISCV_DEBUG_REGS_WALL_CLOCK_1_AT: return uint32_t((g_wall_clock + g_wall_step) >> 32); // XXX add the latching behavior on this reg
 #if TT_ARCH_VERSION == 1
         case RISCV_DEBUG_REGS_TRISC_RESET_PC_OVERRIDE:
             if constexpr (tile_type == 'T') {

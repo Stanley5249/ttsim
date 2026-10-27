@@ -15,6 +15,9 @@ ChipState g_chips[std::max(NUM_CHIPS, NUM_MMIO_CHIPS)]; // an MMIO chip's PCIe t
 uint32_t g_current_chip_id;
 ChipState *g_chip = g_chips;
 uint64_t g_clock;
+uint64_t g_wall_clock;
+uint32_t g_wall_step;
+uint32_t g_wall_steps_max;
 
 uint64_t ttsim_get_clock() {
     return g_clock;
