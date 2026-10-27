@@ -233,7 +233,8 @@ static void clock_current_chip() {
     for (uint32_t tile_id = next_busy_t_tile(0); tile_id < NUM_T_TILES; tile_id = next_busy_t_tile(tile_id + 1)) {
         TensixTile *p_tile = &g_t_tiles[tile_id];
         // Hack: for simulator perf, we clock a tile repeatedly as long as it successfully executes at least one Tensix instruction
-        for (;;) {
+        for (g_wall_step = 0;; g_wall_step++) {
+            g_wall_steps_max = std::max(g_wall_steps_max, g_wall_step + 1);
             for (uint32_t rv32_mask = p_tile->rv32_cores_active; rv32_mask; rv32_mask &= rv32_mask - 1) {
                 uint32_t rv32_index = __builtin_ctz(rv32_mask);
                 rv32_step(&p_tile->rv32[rv32_index]);
@@ -268,6 +269,7 @@ static void clock_current_chip() {
             g_t_tiles_busy[tile_id / 64] &= ~(1ull << (tile_id % 64));
         }
     }
+    g_wall_step = 0;
     for (uint64_t rv32_mask = g_rv32_cores_active; rv32_mask; rv32_mask &= rv32_mask - 1) {
         uint32_t core_index = __builtin_ctzll(rv32_mask);
         uint32_t tile_id = core_index / RV32_CORES_PER_E_TILE;
@@ -287,6 +289,9 @@ extern "C" API_EXPORT void libttsim_clock(uint32_t n_clocks) {
             clock_current_chip();
         }
         g_clock++; // single global timebase, advanced once per clock across all chips
+        g_wall_clock += std::max(g_wall_steps_max, 1u);
+        g_wall_step = 0;
+        g_wall_steps_max = 0;
     }
     ttsim_select_chip(saved_chip_id);
 }
