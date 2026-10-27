@@ -547,6 +547,12 @@ struct ChipState {
 
 extern uint32_t g_current_chip_id;
 extern uint64_t g_clock;
+// The wall clock registers count steps, not clocks: a clock that steps a core several times gives each step its own
+// time, so a core never reads the same time twice. g_wall_clock is the first step of the current clock and
+// g_wall_step the step a core is taking within it.
+extern uint64_t g_wall_clock;
+extern uint32_t g_wall_step;
+extern uint32_t g_wall_steps_max;
 extern ChipState g_chips[NUM_CHIPS];
 
 // XXX transitional
