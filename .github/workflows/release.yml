@@ -13,6 +13,10 @@ on:
       tag:
         description: "Upstream vX.Y.Z release to build; defaults to the highest one"
         required: false
+      validate_only:
+        description: "Build and test the upstream candidate without tagging or publishing"
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -47,7 +51,7 @@ jobs:
 
   build:
     needs: plan
-    if: needs.plan.outputs.release_tag
+    if: needs.plan.outputs.release_tag || inputs.validate_only
     permissions:
       contents: read
     uses: ./.github/workflows/build.yml
@@ -56,6 +60,7 @@ jobs:
       candidate: ${{ needs.plan.outputs.candidate }}
 
   publish:
+    if: ${{ !inputs.validate_only }}
     needs: [plan, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 20

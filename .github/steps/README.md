@@ -4,6 +4,9 @@ The Release workflow checks the highest published, non-prerelease upstream
 `vX.Y.Z` release daily at 22:17 UTC. It does not backfill skipped releases.
 A manual run can select an older upstream release if the patch applies to it.
 There is no dependency on tt-metal, and no approval gate for routine releases.
+Select `validate_only` on a manual run to build the candidate even when already
+released, without creating tags or releases. Scheduled runs always publish new
+versions after validation.
 
 `release.py` selects a version and applies `stepping-clock.patch`. Every build
 job reconstructs the candidate and checks its commit SHA. Fixed commit metadata
