@@ -29,7 +29,17 @@ Regenerate the patch using the command at the top of `release.py`. Versions for
 which this patch conflicts are not released; support requires adapting the
 patch. Do not suppress simulator error checks to make a release pass.
 
-Run controller regression tests with `python3 .github/release/test_release.py`.
+Lint, type-check, and test the controller from `.github/release` with the pinned
+tools. Update the pins in `requirements.in`, then regenerate `requirements.txt`
+with the command at its top. A `uv.lock` is not used because its lines exceed
+the 170-character limit of `scripts/check_style.py`.
+
+```sh
+uv run --no-project --python 3.10 --with-requirements requirements.txt ruff check
+uv run --no-project --python 3.10 --with-requirements requirements.txt pyrefly check
+uv run --no-project --python 3.10 --with-requirements requirements.txt pytest
+```
+
 Run the behavioral check with
 `python3 .github/release/test_wall_clock.py /absolute/path/to/libttsim.so`.
 The check exercises only simulator libraries, not hardware or model weights.

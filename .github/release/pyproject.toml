@@ -31,3 +31,4 @@ python-version = "3.10"
 
 [tool.pytest.ini_options]
 addopts = ["-p", "no:cacheprovider"]
+python_files = ["test_release.py"]
