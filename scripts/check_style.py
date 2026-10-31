@@ -15,7 +15,8 @@ skip_files = {
 
 # Fork release tooling follows ruff format and keeps a uv-generated lockfile, so those files have their own checks
 skip_tool_dir = '.github/release/'
-skip_tool_files = ('.py', 'uv.lock')
+skip_tool_suffix = '.py'
+skip_tool_lockfile = 'uv.lock'
 
 n_errors = 0
 
@@ -85,7 +86,7 @@ def main() -> None:
             path = f'{root}/{name}'
             assert path.startswith('./'), path
             path = path[2:]
-            if path.startswith(skip_tool_dir) and path.endswith(skip_tool_files):
+            if path.startswith(skip_tool_dir) and (name.endswith(skip_tool_suffix) or name == skip_tool_lockfile):
                 continue
             if path not in skip_files:
                 check_file(path)
