@@ -96,10 +96,10 @@ def make_candidate(upstream_sha: str) -> str:
     return git('rev-parse', 'HEAD', cwd=CANDIDATE_DIR)
 
 def is_published(repo: str, tag: str) -> bool:
-    # This endpoint returns published releases only, so a draft reads as 404 like a missing release
+    # Tokens with sufficient access may see drafts here too; only public releases count as complete.
     result = run('gh', 'api', f'repos/{repo}/releases/tags/{tag}', attempts=3, check=False)
     if result.returncode == 0:
-        return True
+        return not json.loads(result.stdout)['draft']
     if 'HTTP 404' in result.stderr:
         return False
     die(f'cannot read release {tag}: {result.stderr.strip()}')
@@ -118,6 +118,9 @@ def plan(args) -> None:
     release_tag = f'{tag}-steps.{numbers[-1] + 1 if numbers else 1}'
     for n in numbers:
         steps_tag = f'{tag}-steps.{n}'
+        # Every fork tag is one patch commit on its upstream base. Refuse a moved upstream tag.
+        if git('rev-parse', f'{steps_tag}^') != upstream_sha:
+            die(f'upstream {tag} no longer matches the base of {steps_tag}')
         if git('rev-parse', f'{steps_tag}^{{tree}}') != tree:
             continue
         if is_published(repo, steps_tag):
@@ -144,9 +147,15 @@ def sha256(path: str) -> str:
     with open(path, 'rb') as f:
         return hashlib.sha256(f.read()).hexdigest()
 
+def verify_assets(release: dict, files: list) -> None:
+    uploaded = {a['name']: (a['size'], a.get('digest')) for a in release['assets']}
+    expected = {os.path.basename(path): (os.path.getsize(path), f'sha256:{sha256(path)}') for path in files}
+    if uploaded != expected:
+        die(f'release {release["tag_name"]} assets {uploaded} differ from the built {expected}')
+
 def publish(args) -> None:
     repo = os.environ['GITHUB_REPOSITORY']
-    names = sorted(os.listdir(args.dist))
+    names = sorted(name for name in os.listdir(args.dist) if name != 'SHA256SUMS')
     for name in REQUIRED_LIBS:
         if name not in names or os.path.getsize(os.path.join(args.dist, name)) == 0:
             die(f'{name} is missing or empty')
@@ -163,6 +172,7 @@ def publish(args) -> None:
     releases = list_releases(repo)
     release = next((r for r in releases if r['tag_name'] == args.release_tag), None)
     if release and not release['draft']:
+        verify_assets(release, files)
         log(f'{args.release_tag} is already published; leaving it as is')
         return
     server = os.environ['GITHUB_SERVER_URL']
@@ -184,10 +194,7 @@ def publish(args) -> None:
         release = next(r for r in list_releases(repo) if r['tag_name'] == args.release_tag)
 
     release = gh_api(f'repos/{repo}/releases/{release["id"]}')
-    uploaded = {a['name']: (a['size'], a['digest']) for a in release['assets']}
-    expected = {os.path.basename(path): (os.path.getsize(path), f'sha256:{sha256(path)}') for path in files}
-    if uploaded != expected:
-        die(f'draft {args.release_tag} assets {uploaded} differ from the built {expected}')
+    verify_assets(release, files)
 
     # A backfilled older version must not take the latest label from a newer one
     newest = max((r['tag_name'] for r in releases if not r['draft'] and STEPS_VERSION.fullmatch(r['tag_name'])),
@@ -214,4 +221,5 @@ def main() -> None:
     args = parser.parse_args()
     args.func(args)
 
-main()
+if __name__ == '__main__':
+    main()

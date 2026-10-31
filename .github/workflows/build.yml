@@ -38,6 +38,10 @@ jobs:
       with:
         persist-credentials: false
 
+    - name: Test Release Decisions
+      working-directory: .
+      run: python3 .github/steps/test_release.py
+
     - name: Rebuild Candidate
       if: inputs.candidate
       working-directory: .
