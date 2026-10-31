@@ -5,7 +5,7 @@
 # commits between jobs. Published tags are the only state: a tag whose tree equals the candidate's is that release.
 #
 # Regenerate the patch from a commit with
-#   git format-patch --no-signature --stdout -1 <commit> | sed 's/[ ]*$//' > .github/steps/stepping-clock.patch
+#   git format-patch --no-signature --stdout -1 <commit> | sed 's/[ ]*$//' > .github/release/stepping-clock.patch
 # Stripping trailing spaces keeps the file within scripts/check_style.py; git apply reads an empty line as an empty
 # context line.
 import argparse
@@ -178,7 +178,7 @@ def publish(args) -> None:
     server = os.environ['GITHUB_SERVER_URL']
     notes = (
         f'Upstream [`{args.upstream_tag}`]({UPSTREAM_URL}/releases/tag/{args.upstream_tag}) (`{args.upstream_sha}`) '
-        f'with `.github/steps/stepping-clock.patch` (blob `{git("hash-object", PATCH)}`), '
+        f'with `.github/release/stepping-clock.patch` (blob `{git("hash-object", PATCH)}`), '
         f'committed as `{args.candidate}`.\n\n'
         f'Built, tested, and released by `{os.environ["GITHUB_SHA"]}` in '
         f'{server}/{repo}/actions/runs/{os.environ["GITHUB_RUN_ID"]}.\n\n'

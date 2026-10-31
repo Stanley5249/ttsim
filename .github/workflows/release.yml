@@ -1,5 +1,5 @@
 # Releases each new upstream tenstorrent/ttsim vX.Y.Z release as vX.Y.Z-steps.N: the upstream commit with
-# .github/steps/stepping-clock.patch applied, built and tested by the Build workflow, and published with upstream's
+# .github/release/stepping-clock.patch applied, built and tested by the Build workflow, and published with upstream's
 # asset names (libttsim_wh.so, libttsim_wh_aarch64.so, ...) so tools that download upstream releases can point here.
 # The daily run takes the highest upstream release and stops early once that is released; a manual run may name an
 # older one to backfill. Upstream code never runs with write access: the publish job only applies the patch and uploads.
@@ -47,7 +47,7 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ inputs.tag }}
       run: |
-        .github/steps/release.py plan "$TAG" >> "$GITHUB_OUTPUT"
+        .github/release/release.py plan "$TAG" >> "$GITHUB_OUTPUT"
 
   build:
     needs: plan
@@ -83,4 +83,4 @@ jobs:
         UPSTREAM_SHA: ${{ needs.plan.outputs.upstream_sha }}
         CANDIDATE: ${{ needs.plan.outputs.candidate }}
       run: |
-        .github/steps/release.py publish "$RELEASE_TAG" "$UPSTREAM_TAG" "$UPSTREAM_SHA" "$CANDIDATE" dist
+        .github/release/release.py publish "$RELEASE_TAG" "$UPSTREAM_TAG" "$UPSTREAM_SHA" "$CANDIDATE" dist

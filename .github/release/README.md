@@ -29,9 +29,9 @@ Regenerate the patch using the command at the top of `release.py`. Versions for
 which this patch conflicts are not released; support requires adapting the
 patch. Do not suppress simulator error checks to make a release pass.
 
-Run controller regression tests with `python3 .github/steps/test_release.py`.
+Run controller regression tests with `python3 .github/release/test_release.py`.
 Run the behavioral check with
-`python3 .github/steps/test_wall_clock.py /absolute/path/to/libttsim.so`.
+`python3 .github/release/test_wall_clock.py /absolute/path/to/libttsim.so`.
 The check exercises only simulator libraries, not hardware or model weights.
 
 Deployment limits: Actions must be enabled on the fork and the workflow must
