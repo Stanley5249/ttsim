@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Builds the simulator on x86_64 and aarch64 to verify the public source remains buildable on every change.
+# The Release workflow calls it with a candidate, the upstream commit plus the fork patch, rebuilt in ./candidate.
 name: Build
 
 on:
@@ -10,18 +11,41 @@ on:
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      upstream_sha:
+        type: string
+        required: true
+      candidate:
+        type: string
+        required: true
 
 jobs:
   build:
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-22.04, ubuntu-22.04-arm, ubuntu-24.04, ubuntu-24.04-arm]
+    defaults:
+      run:
+        working-directory: ${{ inputs.candidate && 'candidate' || '.' }}
 
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+
+    - name: Rebuild Candidate
+      if: inputs.candidate
+      working-directory: .
+      env:
+        UPSTREAM_SHA: ${{ inputs.upstream_sha }}
+        CANDIDATE: ${{ inputs.candidate }}
+      run: |
+        .github/steps/release.py candidate "$UPSTREAM_SHA" "$CANDIDATE"
 
     - name: Run Style Checker
       run: |
@@ -34,3 +58,29 @@ jobs:
     - name: Hash Build Outputs
       run: |
         sha256sum src/_out/{debug,release}_{wh,bh}/libttsim.so
+
+    - name: Test Wall Clock Steps
+      run: |
+        for chip in wh bh; do
+          python3 "$GITHUB_WORKSPACE/.github/steps/test_wall_clock.py" "src/_out/release_$chip/libttsim.so"
+        done
+
+    # Releases ship the Ubuntu 24.04 libraries, named like the upstream assets (libttsim_wh.so, libttsim_wh_aarch64.so, ...)
+    - name: Collect Libraries
+      if: inputs.candidate && startsWith(matrix.runner, 'ubuntu-24.04')
+      env:
+        SUFFIX: ${{ runner.arch == 'ARM64' && '_aarch64' || '' }}
+      run: |
+        mkdir "$GITHUB_WORKSPACE/dist"
+        for lib in src/_out/release_*/libttsim.so; do
+          variant=$(basename "$(dirname "$lib")")
+          cp "$lib" "$GITHUB_WORKSPACE/dist/libttsim_${variant#release_}${SUFFIX}.so"
+        done
+        sha256sum "$GITHUB_WORKSPACE"/dist/*
+
+    - uses: actions/upload-artifact@v4
+      if: inputs.candidate && startsWith(matrix.runner, 'ubuntu-24.04')
+      with:
+        name: libs-${{ matrix.runner }}
+        path: dist/
+        if-no-files-found: error

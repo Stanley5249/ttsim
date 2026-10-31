@@ -1,87 +1,81 @@
-# Builds the simulator libraries from a tag and publishes them as a GitHub Release, named like the upstream assets
-# (libttsim_wh.so, libttsim_wh_aarch64.so, ...), so tools that download upstream releases can point at this repo.
+# Releases each new upstream tenstorrent/ttsim vX.Y.Z release as vX.Y.Z-steps.N: the upstream commit with
+# .github/steps/stepping-clock.patch applied, built and tested by the Build workflow, and published with upstream's
+# asset names (libttsim_wh.so, libttsim_wh_aarch64.so, ...) so tools that download upstream releases can point here.
+# The daily run takes the highest upstream release and stops early once that is released; a manual run may name an
+# older one to backfill. Upstream code never runs with write access: the publish job only applies the patch and uploads.
 name: Release
 
 on:
+  schedule:
+    - cron: '17 22 * * *' # 06:17 in Taiwan
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build and release, such as v1.15.0-steps.1"
-        required: true
+        description: "Upstream vX.Y.Z release to build; defaults to the highest one"
+        required: false
 
 permissions: {}
 
+# One run at a time, never cancelled, so a release is never numbered or published twice
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  build:
-    runs-on: ${{ matrix.runner }}
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            suffix: ""
-          - runner: ubuntu-24.04-arm
-            suffix: _aarch64
-    env:
-      TAG: ${{ inputs.tag }}
-      SUFFIX: ${{ matrix.suffix }}
+    outputs:
+      upstream_tag: ${{ steps.plan.outputs.upstream_tag }}
+      upstream_sha: ${{ steps.plan.outputs.upstream_sha }}
+      candidate: ${{ steps.plan.outputs.candidate }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
     steps:
-    - name: Checkout Tag
-      uses: actions/checkout@v6
+    - uses: actions/checkout@v6
       with:
-        ref: refs/tags/${{ inputs.tag }}
         persist-credentials: false
 
-    - name: Check the Wall Clock Change
+    - name: Plan Release
+      id: plan
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ inputs.tag }}
       run: |
-        grep -q 'g_wall_clock + g_wall_step' src/tile.cpp
+        .github/steps/release.py plan "$TAG" >> "$GITHUB_OUTPUT"
 
-    - name: Build Simulator
-      run: |
-        ./make.py :build
+  build:
+    needs: plan
+    if: needs.plan.outputs.release_tag
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build.yml
+    with:
+      upstream_sha: ${{ needs.plan.outputs.upstream_sha }}
+      candidate: ${{ needs.plan.outputs.candidate }}
 
-    - name: Collect Libraries
-      run: |
-        mkdir dist
-        for dir in src/_out/release_*/; do
-          variant=$(basename "$dir")
-          variant=${variant#release_}
-          [ -f "$dir/libttsim.so" ] || continue
-          cp "$dir/libttsim.so" "dist/libttsim_${variant}${SUFFIX}.so"
-        done
-        sha256sum dist/*
-
-    - uses: actions/upload-artifact@v4
-      with:
-        name: libs${{ matrix.suffix }}
-        path: dist/
-        if-no-files-found: error
-
-  release:
-    needs: build
+  publish:
+    needs: [plan, build]
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: write
-    env:
-      TAG: ${{ inputs.tag }}
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
     steps:
+    - uses: actions/checkout@v6
+
     - uses: actions/download-artifact@v4
       with:
+        pattern: libs-*
         path: dist
         merge-multiple: true
 
     - name: Publish Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+        UPSTREAM_TAG: ${{ needs.plan.outputs.upstream_tag }}
+        UPSTREAM_SHA: ${{ needs.plan.outputs.upstream_sha }}
+        CANDIDATE: ${{ needs.plan.outputs.candidate }}
       run: |
-        commit=$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)
-        {
-          echo "Built by the Release workflow from \`$TAG\` (\`$commit\`), run $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID."
-          echo
-          echo '```text'
-          (cd dist && sha256sum -- *)
-          echo '```'
-        } > notes.md
-        gh release create "$TAG" dist/* --verify-tag --title "$TAG" --notes-file notes.md
+        .github/steps/release.py publish "$RELEASE_TAG" "$UPSTREAM_TAG" "$UPSTREAM_SHA" "$CANDIDATE" dist
