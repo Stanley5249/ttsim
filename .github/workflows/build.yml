@@ -21,6 +21,37 @@ on:
         required: true
 
 jobs:
+  release-tooling:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: .github/release
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v6
+      with:
+        persist-credentials: false
+
+    - uses: astral-sh/setup-uv@v10
+      with:
+        version: "0.13.5"
+
+    - name: Check Lockfile
+      run: uv lock --check
+
+    - name: Check Format
+      run: uv run --locked ruff format --check
+
+    - name: Lint
+      run: uv run --locked ruff check
+
+    - name: Type Check
+      run: uv run --locked pyrefly check
+
+    - name: Test Release Decisions
+      run: uv run --locked pytest
+
   build:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -38,10 +69,6 @@ jobs:
       with:
         persist-credentials: false
 
-    - name: Test Release Decisions
-      working-directory: .
-      run: python3 .github/steps/test_release.py
-
     - name: Rebuild Candidate
       if: inputs.candidate
       working-directory: .
@@ -49,7 +76,7 @@ jobs:
         UPSTREAM_SHA: ${{ inputs.upstream_sha }}
         CANDIDATE: ${{ inputs.candidate }}
       run: |
-        .github/steps/release.py candidate "$UPSTREAM_SHA" "$CANDIDATE"
+        .github/release/release.py candidate "$UPSTREAM_SHA" "$CANDIDATE"
 
     - name: Run Style Checker
       run: |
@@ -66,7 +93,7 @@ jobs:
     - name: Test Wall Clock Steps
       run: |
         for chip in wh bh; do
-          python3 "$GITHUB_WORKSPACE/.github/steps/test_wall_clock.py" "src/_out/release_$chip/libttsim.so"
+          python3 "$GITHUB_WORKSPACE/.github/release/test_wall_clock.py" "src/_out/release_$chip/libttsim.so"
         done
 
     # Releases ship the Ubuntu 24.04 libraries, named like the upstream assets (libttsim_wh.so, libttsim_wh_aarch64.so, ...)

@@ -29,9 +29,19 @@ Regenerate the patch using the command at the top of `release.py`. Versions for
 which this patch conflicts are not released; support requires adapting the
 patch. Do not suppress simulator error checks to make a release pass.
 
-Run controller regression tests with `python3 .github/steps/test_release.py`.
+Lint, type-check, and test the controller from `.github/release`. It is a uv
+project with dev tools locked in `uv.lock`. `scripts/check_style.py` skips its
+Python files and lockfile, which follow `ruff format` and uv instead.
+
+```sh
+uv run --locked ruff format
+uv run --locked ruff check
+uv run --locked pyrefly check
+uv run --locked pytest
+```
+
 Run the behavioral check with
-`python3 .github/steps/test_wall_clock.py /absolute/path/to/libttsim.so`.
+`python3 .github/release/test_wall_clock.py /absolute/path/to/libttsim.so`.
 The check exercises only simulator libraries, not hardware or model weights.
 
 Deployment limits: Actions must be enabled on the fork and the workflow must
