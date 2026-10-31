@@ -40,12 +40,14 @@ VERSION = re.compile(r"v\d+\.\d+\.\d+")
 STEPS_VERSION = re.compile(r"v\d+\.\d+\.\d+-steps\.\d+")
 NETWORK_ATTEMPTS = 3
 
+
 class Asset(TypedDict):
     """An uploaded release asset as the GitHub API reports it."""
 
     name: str
     size: int
     digest: str | None
+
 
 class Release(TypedDict):
     """The fields of a GitHub release that the controller reads."""
@@ -56,14 +58,17 @@ class Release(TypedDict):
     prerelease: bool
     assets: list[Asset]
 
+
 def die(msg: str) -> NoReturn:
     """Print an error and fail the job."""
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(1)
 
+
 def log(msg: str) -> None:
     """Print progress to stderr, keeping stdout for step outputs."""
     print(msg, file=sys.stderr)
+
 
 def run(
     *cmd: str, cwd: str = ".", env: dict[str, str] | None = None, attempts: int = 1, check: bool = True
@@ -81,13 +86,16 @@ def run(
         die(f"{' '.join(cmd)} failed:\n{result.stderr.strip()}")
     return result
 
+
 def git(*args: str, cwd: str = ".") -> str:
     """Run git and return its stripped output."""
     return run("git", *args, cwd=cwd).stdout.strip()
 
+
 def gh_api(path: str, *args: str) -> Release:
     """Call the GitHub API through gh and decode the JSON response."""
     return json.loads(run("gh", "api", path, *args, attempts=NETWORK_ATTEMPTS).stdout)
+
 
 def list_releases(repo: str) -> list[Release]:
     """List all releases of repo, drafts included when the token may see them."""
@@ -95,9 +103,11 @@ def list_releases(repo: str) -> list[Release]:
     pages = json.loads(run("gh", "api", path, "--paginate", "--slurp", attempts=NETWORK_ATTEMPTS).stdout)
     return [r for page in pages for r in page]
 
+
 def version(tag: str) -> tuple[int, ...]:
     """Return the numeric parts of tag for ordering."""
     return tuple(int(x) for x in re.findall(r"\d+", tag))
+
 
 def select_tag(tag: str) -> str:
     """Return the highest published, non-prerelease upstream vX.Y.Z release, or tag after checking it is one."""
@@ -114,6 +124,7 @@ def select_tag(tag: str) -> str:
         die(f"{UPSTREAM_REPO} has no published vX.Y.Z release")
     return max(tags, key=version)
 
+
 def resolve_upstream(tag: str) -> str:
     """Return the commit that the upstream tag points to."""
     refs = run(
@@ -124,6 +135,7 @@ def resolve_upstream(tag: str) -> str:
     if not sha:
         die(f"{UPSTREAM_REPO} has no tag {tag}")
     return sha
+
 
 def make_candidate(upstream_sha: str) -> str:
     """Check out upstream_sha in a worktree and apply the patch, failing on anything but a clean apply."""
@@ -139,6 +151,7 @@ def make_candidate(upstream_sha: str) -> str:
         die(f"the patch does not apply to upstream {upstream_sha}:\n{applied.stdout}{applied.stderr}")
     return git("rev-parse", "HEAD", cwd=CANDIDATE_DIR)
 
+
 def is_published(repo: str, tag: str) -> bool:
     """Return whether tag is a public release; tokens with enough access may see drafts here too."""
     result = run("gh", "api", f"repos/{repo}/releases/tags/{tag}", attempts=NETWORK_ATTEMPTS, check=False)
@@ -147,6 +160,7 @@ def is_published(repo: str, tag: str) -> bool:
     if "HTTP 404" in result.stderr:
         return False
     die(f"cannot read release {tag}: {result.stderr.strip()}")
+
 
 def plan(args: argparse.Namespace) -> None:
     """Print the plan as GitHub step outputs; release_tag is empty when the candidate is already released."""
@@ -185,15 +199,18 @@ def plan(args: argparse.Namespace) -> None:
     print(f"candidate={candidate}")
     print(f"release_tag={release_tag}")
 
+
 def candidate(args: argparse.Namespace) -> None:
     """Rebuild the planned candidate and check that its SHA matches the plan."""
     sha = make_candidate(args.upstream_sha)
     if sha != args.candidate:
         die(f"rebuilt candidate {sha} differs from the planned {args.candidate}")
 
+
 def sha256(path: Path) -> str:
     """Return the hex SHA-256 of the file at path."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
 
 def verify_assets(release: Release, files: list[Path]) -> None:
     """Fail unless the release assets match files by name, size, and digest."""
@@ -201,6 +218,7 @@ def verify_assets(release: Release, files: list[Path]) -> None:
     expected = {path.name: (path.stat().st_size, f"sha256:{sha256(path)}") for path in files}
     if uploaded != expected:
         die(f"release {release['tag_name']} assets {uploaded} differ from the built {expected}")
+
 
 def write_sums(dist: Path) -> tuple[list[Path], str]:
     """Check the required libraries, write SHA256SUMS, and return every file to upload with the sums."""
@@ -212,6 +230,7 @@ def write_sums(dist: Path) -> tuple[list[Path], str]:
     sums = "".join(f"{sha256(path)}  {path.name}\n" for path in libs)
     (dist / SUMS).write_bytes(sums.encode())
     return [*libs, dist / SUMS], sums
+
 
 def publish(args: argparse.Namespace) -> None:
     """Tag the candidate and publish the built libraries, resuming a draft left by an interrupted run."""
@@ -245,9 +264,18 @@ def publish(args: argparse.Namespace) -> None:
         gh_api(f"repos/{repo}/releases/{release['id']}", "-X", "PATCH", "-f", f"body={notes}")
     else:
         run(
-            "gh", "release", "create", args.release_tag, *paths, "--draft", "--verify-tag",
-            "--title", args.release_tag, "--notes", notes,
-        )  # fmt: skip
+            "gh",
+            "release",
+            "create",
+            args.release_tag,
+            *paths,
+            "--draft",
+            "--verify-tag",
+            "--title",
+            args.release_tag,
+            "--notes",
+            notes,
+        )
         release = next(r for r in list_releases(repo) if r["tag_name"] == args.release_tag)
 
     release = gh_api(f"repos/{repo}/releases/{release['id']}")
@@ -261,10 +289,16 @@ def publish(args: argparse.Namespace) -> None:
     )
     make_latest = newest is None or version(args.release_tag) > version(newest)
     gh_api(
-        f"repos/{repo}/releases/{release['id']}", "-X", "PATCH", "-F", "draft=false",
-        "-f", f"make_latest={str(make_latest).lower()}",
-    )  # fmt: skip
+        f"repos/{repo}/releases/{release['id']}",
+        "-X",
+        "PATCH",
+        "-F",
+        "draft=false",
+        "-f",
+        f"make_latest={str(make_latest).lower()}",
+    )
     log(f"published {args.release_tag}{' as latest' if make_latest else ''}")
+
 
 def main() -> None:
     """Parse the command line and run the selected command."""
@@ -283,6 +317,7 @@ def main() -> None:
     p.set_defaults(func=publish)
     args = parser.parse_args()
     args.func(args)
+
 
 if __name__ == "__main__":
     main()

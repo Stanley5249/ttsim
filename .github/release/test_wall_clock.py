@@ -9,14 +9,15 @@ import ctypes
 import sys
 
 BAR0_BASE = 0x100000000
-TLB_CFG = 0x1FC00000 # BAR0 offset of the TLB config registers
-WALL_CLOCK_0 = 0xFFB121F0 # RISCV_DEBUG_REGS_WALL_CLOCK_0
-SOFT_RESET_0 = 0xFFB121B0 # RISCV_DEBUG_REGS_SOFT_RESET_0
-BH_IERISC_RESET_PC = 0xFFB14000 # ETH_RISC_CTRL_IERISC_RESET_PC
-JUMP_TO_SELF = 0x0000006F # jal x0, 0
-IDLE_CLOCKS = 100000 # well past the window in which an eth core counts as busy
+TLB_CFG = 0x1FC00000  # BAR0 offset of the TLB config registers
+WALL_CLOCK_0 = 0xFFB121F0  # RISCV_DEBUG_REGS_WALL_CLOCK_0
+SOFT_RESET_0 = 0xFFB121B0  # RISCV_DEBUG_REGS_SOFT_RESET_0
+BH_IERISC_RESET_PC = 0xFFB14000  # ETH_RISC_CTRL_IERISC_RESET_PC
+JUMP_TO_SELF = 0x0000006F  # jal x0, 0
+IDLE_CLOCKS = 100000  # well past the window in which an eth core counts as busy
 WORMHOLE_ID = 0x401E
 BLACKHOLE_ID = 0xB140
+
 
 class Chip:
     """A simulated chip driven through the libttsim C API."""
@@ -35,7 +36,7 @@ class Chip:
 
     def map(self, addr: int) -> int:
         """Point TLB 0 at the window holding addr and return the BAR0 address of addr."""
-        if self.wormhole: # 1 MiB windows, one 64-bit config each
+        if self.wormhole:  # 1 MiB windows, one 64-bit config each
             self.write(BAR0_BASE + TLB_CFG, (addr >> 20) | (self.coord << 16), 8)
             return BAR0_BASE + (addr & 0xFFFFF)
         # 2 MiB windows, three 32-bit configs each
@@ -69,6 +70,7 @@ class Chip:
         self.lib.libttsim_clock(1)
         return (self.wall_clock() - start) & 0xFFFFFFFF
 
+
 def main() -> None:
     """Run the check on the library named on the command line."""
     chip = Chip(sys.argv[1])
@@ -80,7 +82,7 @@ def main() -> None:
     chip.tile_write32(SOFT_RESET_0, 0)
     chip.lib.libttsim_clock(1)
 
-    chip.tile_write32(0x2000, 0) # a host write to eth sram makes the core busy
+    chip.tile_write32(0x2000, 0)  # a host write to eth sram makes the core busy
     busy = chip.clock_once()
     chip.lib.libttsim_clock(IDLE_CLOCKS)
     idle = chip.clock_once()
@@ -89,6 +91,7 @@ def main() -> None:
         sys.exit("a busy eth core steps several times per clock, so the wall clock must count each step")
     if idle != 1:
         sys.exit("an idle core steps once per clock, so the wall clock must advance by one")
+
 
 if __name__ == "__main__":
     main()

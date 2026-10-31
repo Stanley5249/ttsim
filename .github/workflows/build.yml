@@ -27,8 +27,6 @@ jobs:
     defaults:
       run:
         working-directory: .github/release
-    env:
-      UV: uv run --no-project --python 3.10 --with-requirements requirements.txt
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v6
@@ -39,19 +37,20 @@ jobs:
       with:
         version: "0.13.5"
 
-    - name: Check Pinned Requirements
-      run: |
-        uv pip compile requirements.in --universal --python-version 3.10 --no-annotate -q -o requirements.txt
-        git diff --exit-code requirements.txt
+    - name: Check Lockfile
+      run: uv lock --check
+
+    - name: Check Format
+      run: uv run --locked ruff format --check
 
     - name: Lint
-      run: $UV ruff check
+      run: uv run --locked ruff check
 
     - name: Type Check
-      run: $UV pyrefly check
+      run: uv run --locked pyrefly check
 
     - name: Test Release Decisions
-      run: $UV pytest
+      run: uv run --locked pytest
 
   build:
     runs-on: ${{ matrix.runner }}

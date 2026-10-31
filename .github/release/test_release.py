@@ -11,9 +11,11 @@ import release as ci
 
 TAG = "v1.0.0-steps.1"
 
+
 def release(tag: str, *, draft: bool = False, prerelease: bool = False) -> ci.Release:
     """Return a release record with no assets."""
     return {"id": 1, "tag_name": tag, "draft": draft, "prerelease": prerelease, "assets": []}
+
 
 @pytest.mark.parametrize("draft", [False, True])
 def test_draft_is_not_published(monkeypatch: pytest.MonkeyPatch, *, draft: bool) -> None:
@@ -21,11 +23,13 @@ def test_draft_is_not_published(monkeypatch: pytest.MonkeyPatch, *, draft: bool)
     monkeypatch.setattr(ci, "run", Mock(return_value=Mock(returncode=0, stdout=json.dumps({"draft": draft}))))
     assert ci.is_published("owner/repo", TAG) is not draft
 
+
 def test_api_failure_is_not_a_missing_release(monkeypatch: pytest.MonkeyPatch) -> None:
     """A server error must fail instead of reading as a missing release."""
     monkeypatch.setattr(ci, "run", Mock(return_value=Mock(returncode=1, stderr="HTTP 503")))
     with pytest.raises(SystemExit):
         ci.is_published("owner/repo", TAG)
+
 
 def test_highest_version_ignores_draft_and_prerelease(monkeypatch: pytest.MonkeyPatch) -> None:
     """Versions compare numerically, and drafts and prereleases are skipped."""
@@ -37,6 +41,7 @@ def test_highest_version_ignores_draft_and_prerelease(monkeypatch: pytest.Monkey
     ]
     monkeypatch.setattr(ci, "list_releases", Mock(return_value=releases))
     assert ci.select_tag("") == "v1.10.0"
+
 
 def test_moved_upstream_tag_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     """A fork tag whose base differs from the current upstream tag stops the plan."""
@@ -56,6 +61,7 @@ def test_moved_upstream_tag_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(ci, "git", git)
     with pytest.raises(SystemExit):
         ci.plan(argparse.Namespace(tag=""))
+
 
 @pytest.mark.parametrize(
     ("draft", "valid_assets", "newer_release"),

@@ -13,6 +13,10 @@ skip_files = {
     'data/wh/eth_fw.bin',
 }
 
+# Fork release tooling follows ruff format and keeps a uv-generated lockfile, so those files have their own checks
+skip_tool_dir = '.github/release/'
+skip_tool_files = ('.py', 'uv.lock')
+
 n_errors = 0
 
 def report_error(path: str, line_num: int, msg: str) -> None:
@@ -74,13 +78,15 @@ def main() -> None:
     parser.parse_args()
 
     for (root, dirs, files) in os.walk('.'):
-        for name in ['.git', '.vscode', '_out', '__pycache__']:
+        for name in ['.git', '.vscode', '_out', '__pycache__', '.venv', '.ruff_cache', '.pytest_cache']:
             if name in dirs:
                 dirs.remove(name)
         for name in files:
             path = f'{root}/{name}'
             assert path.startswith('./'), path
             path = path[2:]
+            if path.startswith(skip_tool_dir) and path.endswith(skip_tool_files):
+                continue
             if path not in skip_files:
                 check_file(path)
 

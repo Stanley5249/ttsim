@@ -1,13 +1,25 @@
-# Tool settings for the fork release scripts. The pinned tools live in requirements.txt, because a uv.lock would
-# break the 170-character limit of scripts/check_style.py.
 [project]
 name = "ttsim-release"
 version = "0.0.0"
+description = "Fork release tooling for tenstorrent/ttsim"
 requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pyrefly==1.4.0",
+    "pytest==9.2.0",
+    "ruff==0.17.3",
+]
+
+[tool.uv]
+package = false
 
 [tool.ruff]
 line-length = 120
-cache-dir = "_out/ruff_cache"
+
+[tool.ruff.format]
+line-ending = "lf"
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -27,8 +39,6 @@ convention = "google"
 
 [tool.pyrefly]
 preset = "strict"
-python-version = "3.10"
 
 [tool.pytest.ini_options]
-addopts = ["-p", "no:cacheprovider"]
 python_files = ["test_release.py"]
