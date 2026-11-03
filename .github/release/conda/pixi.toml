@@ -1,0 +1,8 @@
+# Locks the rattler-build that the Release workflow runs to package each release's libraries
+[workspace]
+name = "ttsim-conda"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+rattler-build = "==0.80.0"

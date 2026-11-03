@@ -1,1 +1,2 @@
 uv.lock merge=binary linguist-language=TOML linguist-generated=true -diff
+pixi.lock merge=binary linguist-language=YAML linguist-generated=true -diff

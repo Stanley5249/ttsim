@@ -79,7 +79,7 @@ def main() -> None:
     parser.parse_args()
 
     for (root, dirs, files) in os.walk('.'):
-        for name in ['.git', '.vscode', '_out', '__pycache__', '.venv', '.ruff_cache', '.pytest_cache']:
+        for name in ['.git', '.vscode', '_out', '__pycache__', '.venv', '.pixi', '.ruff_cache', '.pytest_cache']:
             if name in dirs:
                 dirs.remove(name)
         for name in files:

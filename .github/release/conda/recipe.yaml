@@ -1,0 +1,61 @@
+# Repackages the x86_64 libraries of release RELEASE_TAG, downloaded to TTSIM_DIST, as one ttsim conda package.
+# The package ships no soc_descriptor.yaml: tt-metal's descriptors follow tt-metal releases, and newer UMD finds the
+# Wormhole and Blackhole descriptors on its own but would prefer a stale one placed beside the library.
+context:
+  # Conda versions cannot contain "-", so vX.Y.Z-steps.N becomes X.Y.Z+steps.N
+  version: ${{ env.get("RELEASE_TAG")[1:] | replace("-steps.", "+steps.") }}
+  # Raise only to repackage the same tag
+  build_number: 0
+
+package:
+  name: ttsim
+  version: ${{ version }}
+
+source:
+  - path: ${{ env.get("TTSIM_DIST") }}
+  # The license and notice that Apache-2.0 requires to travel with the binaries
+  - path: ../../..
+    filter:
+      - LICENSE
+      - NOTICE
+
+build:
+  number: ${{ build_number }}
+  string: ${{ build_number }}
+  # Ship the release binaries byte for byte; they need only libc and embed no build prefix
+  dynamic_linking:
+    binary_relocation: false
+    missing_dso_allowlist:
+      - libc.so.6
+  prefix_detection:
+    ignore: true
+  # The multi-chip libraries are optional, so an unmatched glob expands to nothing; a missing base library still fails
+  script: |
+    shopt -s nullglob
+    for chip in wh bh; do
+      mkdir -p "$PREFIX/lib/ttsim/$chip"
+      for lib in "libttsim_$chip.so" libttsim_${chip}_x*.so; do
+        case "$lib" in
+          *_aarch64.so) ;;
+          *) cp "$lib" "$PREFIX/lib/ttsim/$chip/" ;;
+        esac
+      done
+    done
+
+tests:
+  - package_contents:
+      files:
+        exists:
+          - lib/ttsim/wh/libttsim_wh.so
+          - lib/ttsim/bh/libttsim_bh.so
+        not_exists:
+          - lib/ttsim/**/*_aarch64.so
+
+about:
+  homepage: https://github.com/Stanley5249/ttsim
+  repository: https://github.com/Stanley5249/ttsim
+  summary: Tenstorrent Wormhole and Blackhole simulator libraries with the stepping clock patch
+  license: Apache-2.0
+  license_file:
+    - LICENSE
+    - NOTICE
