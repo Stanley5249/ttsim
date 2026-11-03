@@ -59,28 +59,92 @@ jobs:
       upstream_sha: ${{ needs.plan.outputs.upstream_sha }}
       candidate: ${{ needs.plan.outputs.candidate }}
 
-  publish:
-    if: ${{ !inputs.validate_only }}
+  # Repackages the x86_64 libraries as one conda package; a validate_only run without a new release uses steps.0
+  package:
     needs: [plan, build]
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
     steps:
     - uses: actions/checkout@v6
+      with:
+        persist-credentials: false
 
-    - uses: actions/download-artifact@v4
+    - uses: actions/download-artifact@v8
       with:
         pattern: libs-*
         path: dist
         merge-multiple: true
 
+    - uses: prefix-dev/setup-pixi@ad1da6449d9e506fd127fd67ab2d054a769f6a94 # v0.11.2
+      with:
+        pixi-version: v0.83.0
+        manifest-path: .github/release/conda/pixi.toml
+        cache: false
+
+    - name: Build Conda Package
+      env:
+        RELEASE_TAG: ${{ needs.plan.outputs.release_tag || format('{0}-steps.0', needs.plan.outputs.upstream_tag) }}
+        TTSIM_DIST: ${{ github.workspace }}/dist
+      run: |
+        pixi run --locked --manifest-path .github/release/conda/pixi.toml \
+          rattler-build build --recipe .github/release/conda/recipe.yaml --output-dir conda
+        sha256sum conda/linux-64/*.conda
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: conda
+        path: conda/linux-64/*.conda
+        if-no-files-found: error
+
+  publish:
+    if: ${{ !inputs.validate_only }}
+    needs: [plan, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+    # GITHUB_TOKEN cannot push a tag whose workflow files differ from the default branch, which every candidate's do,
+    # so the job tags and publishes as the release App with a token that expires with the job
+    - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+      id: app-token
+      with:
+        app-id: ${{ vars.RELEASE_APP_ID }}
+        private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        permission-contents: write
+        permission-workflows: write
+
+    - uses: actions/checkout@v6
+      with:
+        token: ${{ steps.app-token.outputs.token }}
+
+    # The package joins the libraries in dist, so the release uploads, sums, and verifies it before going public
+    - uses: actions/download-artifact@v8
+      with:
+        pattern: '{libs-*,conda}'
+        path: dist
+        merge-multiple: true
+
     - name: Publish Release
       env:
-        GH_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
         RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
         UPSTREAM_TAG: ${{ needs.plan.outputs.upstream_tag }}
         UPSTREAM_SHA: ${{ needs.plan.outputs.upstream_sha }}
         CANDIDATE: ${{ needs.plan.outputs.candidate }}
       run: |
         .github/release/release.py publish "$RELEASE_TAG" "$UPSTREAM_TAG" "$UPSTREAM_SHA" "$CANDIDATE" dist
+
+    - name: Summarize Conda Package
+      env:
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+      run: |
+        name=$(basename dist/ttsim-*.conda)
+        pin=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" | jq -er --arg name "$name" \
+          '.assets[] | select(.name == $name and .digest != null) | "\(.browser_download_url) \(.digest)"')
+        read -r url digest <<< "$pin"
+        printf '### Conda package\n\n```toml\nttsim = { url = "%s", sha256 = "%s" }\n```\n' \
+          "$url" "${digest#sha256:}" >> "$GITHUB_STEP_SUMMARY"

@@ -109,7 +109,7 @@ jobs:
         done
         sha256sum "$GITHUB_WORKSPACE"/dist/*
 
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v7
       if: inputs.candidate && startsWith(matrix.runner, 'ubuntu-24.04')
       with:
         name: libs-${{ matrix.runner }}

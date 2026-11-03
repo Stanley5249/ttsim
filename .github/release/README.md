@@ -47,7 +47,49 @@ The check exercises only simulator libraries, not hardware or model weights.
 Deployment limits: Actions must be enabled on the fork and the workflow must
 be present on its default branch. GitHub may disable scheduled workflows after
 60 days of repository inactivity; this workflow cannot recover from its own
-disablement. Tag creation with GITHUB_TOKEN may be rejected when candidate
-history changes workflow files. Validate token permissions in the first real
-release run before relying on unattended publication. Local regression tests
-mock GitHub writes; they do not prove these platform permissions.
+disablement. Local regression tests mock GitHub writes; they do not prove
+these platform permissions.
+
+The publish job tags and publishes as a GitHub App, because GITHUB_TOKEN can
+never get the `workflows` permission and GitHub rejects a tag whose workflow
+files differ from the default branch. The App is private to the owner,
+installed only on this repository, and grants Contents and Workflows write.
+The job reads its ID from the `RELEASE_APP_ID` variable and its key from the
+`RELEASE_APP_PRIVATE_KEY` secret, and its token expires with the job.
+
+## Conda package
+
+Each release also carries `ttsim-X.Y.Z+steps.N-0.conda` for `linux-64`,
+because conda versions cannot contain `-`. It installs the x86_64 libraries
+byte for byte as `lib/ttsim/{wh,bh}/libttsim_<chip>[_xN].so`. Consumers pin it
+by URL and sha256, which the publish job prints in its summary. The `package`
+job builds it with the rattler-build that `conda/pixi.lock` locks, and the
+publish job uploads and verifies it with the libraries in the same draft.
+
+The package ships no `soc_descriptor.yaml`. tt-metal changes its descriptors
+together with its own reader code, so they belong to the tt-metal version.
+Newer UMD finds the Wormhole and Blackhole descriptors on its own, and it would
+prefer a stale descriptor placed beside the library. A consumer on an older
+tt-metal copies the descriptor from that tt-metal next to a link to the library.
+
+rattler-build stamps the build time into the package, so a rebuild of the same
+tag has a new sha256. Public assets are never rebuilt, so a pinned hash holds.
+
+Releases published before the package existed get it by hand, once. From the
+repository root, download the libraries, check them against the asset digests,
+build, and upload. The upload has no `--clobber`, so it refuses to replace an
+existing package.
+
+```sh
+tag=vX.Y.Z-steps.N
+dist=$(mktemp -d) out=$(mktemp -d)
+gh api "repos/Stanley5249/ttsim/releases/tags/$tag" \
+  --jq '.assets[] | select(.name | test("^libttsim_.*\\.so$")) | "\(.digest | ltrimstr("sha256:"))  \(.name)"' \
+  > "$dist/SHA256SUMS"
+gh release download "$tag" -R Stanley5249/ttsim --pattern 'libttsim_*.so' --dir "$dist"
+(cd "$dist" && sha256sum --check --strict SHA256SUMS)
+RELEASE_TAG=$tag TTSIM_DIST=$dist \
+  pixi run --locked --manifest-path .github/release/conda/pixi.toml \
+  rattler-build build --recipe .github/release/conda/recipe.yaml --output-dir "$out"
+gh release upload "$tag" -R Stanley5249/ttsim "$out"/linux-64/ttsim-*.conda
+```
