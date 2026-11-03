@@ -65,9 +65,21 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
-      contents: write
+      contents: read
     steps:
+    # GITHUB_TOKEN cannot push a tag whose workflow files differ from the default branch, which every candidate's do,
+    # so the job tags and publishes as the release App with a token that expires with the job
+    - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+      id: app-token
+      with:
+        app-id: ${{ vars.RELEASE_APP_ID }}
+        private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        permission-contents: write
+        permission-workflows: write
+
     - uses: actions/checkout@v6
+      with:
+        token: ${{ steps.app-token.outputs.token }}
 
     - uses: actions/download-artifact@v4
       with:
@@ -77,7 +89,7 @@ jobs:
 
     - name: Publish Release
       env:
-        GH_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
         RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
         UPSTREAM_TAG: ${{ needs.plan.outputs.upstream_tag }}
         UPSTREAM_SHA: ${{ needs.plan.outputs.upstream_sha }}

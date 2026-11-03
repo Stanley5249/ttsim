@@ -47,7 +47,12 @@ The check exercises only simulator libraries, not hardware or model weights.
 Deployment limits: Actions must be enabled on the fork and the workflow must
 be present on its default branch. GitHub may disable scheduled workflows after
 60 days of repository inactivity; this workflow cannot recover from its own
-disablement. Tag creation with GITHUB_TOKEN may be rejected when candidate
-history changes workflow files. Validate token permissions in the first real
-release run before relying on unattended publication. Local regression tests
-mock GitHub writes; they do not prove these platform permissions.
+disablement. Local regression tests mock GitHub writes; they do not prove
+these platform permissions.
+
+The publish job tags and publishes as a GitHub App, because GITHUB_TOKEN can
+never get the `workflows` permission and GitHub rejects a tag whose workflow
+files differ from the default branch. The App is private to the owner,
+installed only on this repository, and grants Contents and Workflows write.
+The job reads its ID from the `RELEASE_APP_ID` variable and its key from the
+`RELEASE_APP_PRIVATE_KEY` secret, and its token expires with the job.
