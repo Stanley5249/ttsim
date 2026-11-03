@@ -18,6 +18,10 @@ Ubuntu 24.04 artifacts supply the release libraries. Publishing creates a draft,
 checks asset sizes and hashes, then makes it public automatically. Old-version
 backfills do not take the latest label from a newer version.
 
+Releases carry only the Wormhole and Blackhole libraries, `wh` and `bh` with
+their multichip variants, because the public source builds only those chips.
+Upstream's `libttsim_qsr.so` for Quasar has no counterpart here.
+
 Fork tags are one patch commit on the upstream base. A changed upstream tag is
 an error. Tags are never moved and public assets are never overwritten. Drafts
 can be resumed after interruption. Matching published source is skipped, while
