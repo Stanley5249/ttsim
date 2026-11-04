@@ -1,6 +1,6 @@
 # Repackages the x86_64 libraries of release RELEASE_TAG, downloaded to TTSIM_DIST, as one ttsim conda package.
-# The package ships no soc_descriptor.yaml: tt-metal's descriptors follow tt-metal releases, and newer UMD finds the
-# Wormhole and Blackhole descriptors on its own but would prefer a stale one placed beside the library.
+# The package ships no soc_descriptor.yaml: tt-metal owns its descriptors, so a consumer links its own tt-metal's
+# descriptor beside the library, where UMD reads it.
 context:
   # Conda versions cannot contain "-", so vX.Y.Z-steps.N becomes X.Y.Z+steps.N
   version: ${{ env.get("RELEASE_TAG")[1:] | replace("-steps.", "+steps.") }}

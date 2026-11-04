@@ -70,11 +70,11 @@ by URL and sha256, which the publish job prints in its summary. The `package`
 job builds it with the rattler-build that `conda/pixi.lock` locks, and the
 publish job uploads and verifies it with the libraries in the same draft.
 
-The package ships no `soc_descriptor.yaml`. tt-metal changes its descriptors
-together with its own reader code, so they belong to the tt-metal version.
-Newer UMD finds the Wormhole and Blackhole descriptors on its own, and it would
-prefer a stale descriptor placed beside the library. A consumer on an older
-tt-metal copies the descriptor from that tt-metal next to a link to the library.
+The package ships no `soc_descriptor.yaml`. tt-metal owns its descriptors, also
+reads them on real hardware, and changes them together with its reader code.
+UMD reads the descriptor beside the library and fails without it, as tt-metal
+0.81 and 0.82 do, so a consumer links its own tt-metal's descriptor into
+`lib/ttsim/<chip>/` as `soc_descriptor.yaml`.
 
 rattler-build stamps the build time into the package, so a rebuild of the same
 tag has a new sha256. Public assets are never rebuilt, so a pinned hash holds.
