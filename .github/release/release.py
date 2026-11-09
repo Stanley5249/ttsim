@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Release an upstream tenstorrent/ttsim vX.Y.Z as the fork release vX.Y.Z-steps.N.
 
-A release is the upstream tag commit with stepping-clock.patch applied on top. The candidate commit is a pure function
+A release is the upstream tag commit with unit-tick.patch applied on top. The patch steps each Tensix tile and eth core
+once per clock, so the wall clock, which counts clocks, never repeats on one core. The -steps.N suffix stays from the
+earlier stepping-clock patch, so tags keep one numbering per upstream version. The candidate commit is a pure function
 of the upstream commit and the patch (fixed committer, committer date taken from the patch), so every job rebuilds the
 same SHA instead of passing commits between jobs. Published tags are the only state: a tag whose tree equals the
 candidate's is that release.
 
 Regenerate the patch from a commit with
 
-    git format-patch --no-signature --stdout -1 <commit> | sed 's/[ ]*$//' > .github/release/stepping-clock.patch
+    git format-patch --no-signature --stdout -1 <commit> | sed 's/[ ]*$//' > .github/release/unit-tick.patch
 
 Stripping trailing spaces keeps the file within scripts/check_style.py; git apply reads an empty line as an empty
 context line.
@@ -27,7 +29,7 @@ from typing import NoReturn, TypedDict
 
 UPSTREAM_REPO = "tenstorrent/ttsim"
 UPSTREAM_URL = f"https://github.com/{UPSTREAM_REPO}"
-PATCH = Path(__file__).resolve().with_name("stepping-clock.patch")
+PATCH = Path(__file__).resolve().with_name("unit-tick.patch")
 CANDIDATE_DIR = "candidate"
 COMMITTER = {
     "GIT_COMMITTER_NAME": "github-actions[bot]",

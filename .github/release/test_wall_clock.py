@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Check the stepping wall clock of a single-chip Wormhole or Blackhole libttsim.so through its public API.
+"""Check the unit tick wall clock of a single-chip Wormhole or Blackhole libttsim.so through its public API.
 
-While an eth core is busy, one clock steps it several times and the wall clock must count each step; once it is idle,
-one clock is one step. The host reads the wall clock between clocks through a BAR0 TLB window, as tt-umd does.
+Every core takes one step per clock, so the wall clock advances by exactly one per clock, whether an eth core counts as
+busy or idle, and over many clocks it equals the number of clocks issued. The host reads the wall clock between clocks
+through a BAR0 TLB window, as tt-umd does.
 """
 
 import ctypes
@@ -15,6 +16,7 @@ SOFT_RESET_0 = 0xFFB121B0  # RISCV_DEBUG_REGS_SOFT_RESET_0
 BH_IERISC_RESET_PC = 0xFFB14000  # ETH_RISC_CTRL_IERISC_RESET_PC
 JUMP_TO_SELF = 0x0000006F  # jal x0, 0
 IDLE_CLOCKS = 100000  # well past the window in which an eth core counts as busy
+BUSY_CLOCKS = 64  # single clocks checked inside that window, which upstream sets to 1024 clocks
 WORMHOLE_ID = 0x401E
 BLACKHOLE_ID = 0xB140
 
@@ -64,10 +66,10 @@ class Chip:
         """Read the low 32 bits of the eth tile wall clock."""
         return self.read32(self.map(WALL_CLOCK_0))
 
-    def clock_once(self) -> int:
-        """Return the wall clock ticks taken by one clock."""
+    def ticks(self, clocks: int) -> int:
+        """Return the wall clock ticks taken by one libttsim_clock call of clocks clocks."""
         start = self.wall_clock()
-        self.lib.libttsim_clock(1)
+        self.lib.libttsim_clock(clocks)
         return (self.wall_clock() - start) & 0xFFFFFFFF
 
 
@@ -83,14 +85,19 @@ def main() -> None:
     chip.lib.libttsim_clock(1)
 
     chip.tile_write32(0x2000, 0)  # a host write to eth sram makes the core busy
-    busy = chip.clock_once()
-    chip.lib.libttsim_clock(IDLE_CLOCKS)
-    idle = chip.clock_once()
-    print(f"{sys.argv[1]}: wall clock ticks per clock: busy {busy}, idle {idle}")
-    if busy <= 1:
-        sys.exit("a busy eth core steps several times per clock, so the wall clock must count each step")
+    busy = [chip.ticks(1) for _ in range(BUSY_CLOCKS)]
+    idle_run = chip.ticks(IDLE_CLOCKS)
+    idle = chip.ticks(1)
+    print(
+        f"{sys.argv[1]}: wall clock ticks per clock: busy {sorted(set(busy))}, idle {idle}; "
+        f"over {IDLE_CLOCKS} clocks: {idle_run}"
+    )
+    if any(t != 1 for t in busy):
+        sys.exit("a busy eth core steps once per clock, so the wall clock must advance by one")
     if idle != 1:
         sys.exit("an idle core steps once per clock, so the wall clock must advance by one")
+    if idle_run != IDLE_CLOCKS:
+        sys.exit("the wall clock counts clocks, so it must advance by the number of clocks issued")
 
 
 if __name__ == "__main__":

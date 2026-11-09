@@ -8,10 +8,18 @@ Select `validate_only` on a manual run to build the candidate even when already
 released, without creating tags or releases. Scheduled runs always publish new
 versions after validation.
 
-`release.py` selects a version and applies `stepping-clock.patch`. Every build
+`release.py` selects a version and applies `unit-tick.patch`. Every build
 job reconstructs the candidate and checks its commit SHA. Fixed commit metadata
 makes this reproducible without pushing temporary branches. Build jobs have
 read access only. The publishing job runs controller code, never candidate code.
+
+The patch steps each Tensix tile and each eth core once per clock. Upstream
+clocks a busy tile repeatedly within one clock and gives a busy eth core
+several steps, so a core read the same wall clock on several steps. The wall
+clock registers stay as upstream and return `g_clock`, which now gives every
+step of a core its own time. Simulation runs slower in exchange. Tags keep the
+`-steps.N` suffix of the earlier `stepping-clock.patch`, which counted steps in
+the wall clock instead.
 
 The existing four OS/CPU build jobs run style and wall-clock behavior checks.
 Ubuntu 24.04 artifacts supply the release libraries. Publishing creates a draft,
