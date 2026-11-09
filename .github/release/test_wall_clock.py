@@ -162,8 +162,8 @@ class Chip:
         self.lib.libttsim_clock(clocks)
         return (self.tile_read32(self.eth, WALL_CLOCK_0) - start) & 0xFFFFFFFF
 
-    def eth_delta(self) -> int:
-        """Run clock_delta on the eth core while it is busy and return the difference it stored."""
+    def eth_delta(self) -> tuple[int, int]:
+        """Run clock_delta on the eth core while it is busy; return the difference it stored and the ticks taken."""
         # Blackhole starts only from a programmed nonzero reset PC
         program = 0 if self.wormhole else 0x1000
         self.tile_write32(self.eth, ETH_RESULT, SENTINEL)
@@ -172,27 +172,28 @@ class Chip:
         if not self.wormhole:
             self.tile_write32(self.eth, BH_IERISC_RESET_PC, program)
         self.tile_write32(self.eth, SOFT_RESET_0, 0)
-        self.lib.libttsim_clock(RUN_CLOCKS)
-        return self.tile_read32(self.eth, ETH_RESULT)
+        ticks = self.ticks(RUN_CLOCKS)
+        return self.tile_read32(self.eth, ETH_RESULT), ticks
 
-    def tensix_delta(self) -> int:
-        """Run tensix_busy and then clock_delta on BRISC, which starts at 0, and return the difference it stored."""
+    def tensix_delta(self) -> tuple[int, int]:
+        """Run tensix_busy, then clock_delta, on BRISC from 0; return the difference and the ticks taken."""
         self.tile_write32(self.tensix, TENSIX_RESULT, SENTINEL)
         self.load(self.tensix, 0, [*tensix_busy(), *clock_delta(TENSIX_RESULT)])
         self.tile_write32(self.tensix, SOFT_RESET_0, BRISC_ONLY)
-        self.lib.libttsim_clock(RUN_CLOCKS)
-        return self.tile_read32(self.tensix, TENSIX_RESULT)
+        ticks = self.ticks(RUN_CLOCKS)
+        return self.tile_read32(self.tensix, TENSIX_RESULT), ticks
 
 
 def main() -> None:
     """Run the checks on the library named on the command line."""
     chip = Chip(sys.argv[1])
-    eth = chip.eth_delta()
-    tensix = chip.tensix_delta()
+    eth, eth_ticks = chip.eth_delta()
+    tensix, tensix_ticks = chip.tensix_delta()
     clocks = chip.ticks(CLOCKS)
     print(
         f"{sys.argv[1]}: back-to-back wall clock reads differ by {eth} on a busy eth core "
-        f"and by {tensix} on BRISC while Tensix executes; {CLOCKS} clocks take {clocks} ticks"
+        f"and by {tensix} on BRISC while Tensix executes; {RUN_CLOCKS} busy clocks take {eth_ticks} ticks "
+        f"on eth and {tensix_ticks} on Tensix; {CLOCKS} idle clocks take {clocks} ticks"
     )
     if SENTINEL in (eth, tensix):
         sys.exit("a program did not store its result")
@@ -200,6 +201,8 @@ def main() -> None:
         sys.exit("a busy eth core steps once per clock, so its back-to-back reads must differ by one")
     if tensix != 1:
         sys.exit("a Tensix tile steps once per clock while it executes Tensix instructions, so BRISC's reads must too")
+    if eth_ticks != RUN_CLOCKS or tensix_ticks != RUN_CLOCKS:
+        sys.exit("busy cores step once per clock, so the wall clock must advance by one per clock while they run")
     if clocks != CLOCKS:
         sys.exit("the wall clock counts clocks, so it must advance by the number of clocks issued")
 
