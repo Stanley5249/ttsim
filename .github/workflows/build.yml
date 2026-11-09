@@ -94,7 +94,7 @@ jobs:
       run: |
         sha256sum src/_out/{debug,release}_{wh,bh}/libttsim.so
 
-    - name: Test Wall Clock Steps
+    - name: Test Unit Tick Wall Clock
       run: |
         for chip in wh bh; do
           python3 "$GITHUB_WORKSPACE/.github/release/test_wall_clock.py" "src/_out/release_$chip/libttsim.so"
