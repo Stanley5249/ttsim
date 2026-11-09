@@ -190,8 +190,12 @@ def plan(args: argparse.Namespace) -> None:
     release_tag = f"{tag}-steps.{numbers[-1] + 1 if numbers else 1}"
     for n in numbers:
         steps_tag = f"{tag}-steps.{n}"
-        # Every fork tag is one patch commit on its upstream base. Refuse a moved upstream tag.
+        # Every fork tag is one patch commit on its upstream base. Refuse a moved upstream tag. v1.12.1-steps.1
+        # predates that rule and holds two commits on upstream, so a tag that still contains upstream only differs.
         if git("rev-parse", f"{steps_tag}^") != upstream_sha:
+            if run("git", "merge-base", "--is-ancestor", upstream_sha, steps_tag, check=False).returncode == 0:
+                log(f"{steps_tag} holds more than one commit on upstream {tag}, so it is not this candidate")
+                continue
             die(f"upstream {tag} no longer matches the base of {steps_tag}")
         if git("rev-parse", f"{steps_tag}^{{tree}}") != tree:
             continue

@@ -76,10 +76,30 @@ def test_moved_upstream_tag_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(ci, "select_tag", Mock(return_value="v1.0.0"))
     monkeypatch.setattr(ci, "resolve_upstream", Mock(return_value="moved-upstream"))
     monkeypatch.setattr(ci, "make_candidate", Mock(return_value="candidate"))
-    monkeypatch.setattr(ci, "run", Mock())
+    monkeypatch.setattr(ci, "run", Mock(return_value=Mock(returncode=1)))
     monkeypatch.setattr(ci, "git", git)
     with pytest.raises(SystemExit):
         ci.plan(argparse.Namespace(tag=""))
+
+
+def test_tag_with_several_commits_on_upstream_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A fork tag that contains upstream in more than one commit, such as v1.12.1-steps.1, gets the next suffix."""
+
+    def git(*args: str) -> str:
+        if args[0] == "tag":
+            return "v1.12.1-steps.1"
+        return {"candidate^{tree}": "tree", "v1.12.1-steps.1^": "older-fork-commit"}[args[1]]
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setattr(ci, "select_tag", Mock(return_value="v1.12.1"))
+    monkeypatch.setattr(ci, "resolve_upstream", Mock(return_value="upstream"))
+    monkeypatch.setattr(ci, "make_candidate", Mock(return_value="candidate"))
+    monkeypatch.setattr(ci, "run", Mock(return_value=Mock(returncode=0)))
+    monkeypatch.setattr(ci, "git", git)
+    ci.plan(argparse.Namespace(tag=""))
+    assert "release_tag=v1.12.1-steps.2\n" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
