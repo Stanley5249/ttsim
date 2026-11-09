@@ -59,6 +59,11 @@ uv run --locked pytest
 Run the behavioral check with
 `python3 .github/release/test_wall_clock.py /absolute/path/to/libttsim.so`.
 The check exercises only simulator libraries, not hardware or model weights.
+It loads hand-assembled RV32I programs that read the wall clock twice in a row
+and store the difference: one on a busy eth core, and one on BRISC while its
+Tensix thread executes a replayed run of `DMANOP`s. Each difference must be 1;
+an upstream library gives 0 for the Tensix case, and for the eth case from the
+releases with eth busy steps on.
 
 Deployment limits: Actions must be enabled on the fork and the workflow must
 be present on its default branch. GitHub may disable scheduled workflows after
