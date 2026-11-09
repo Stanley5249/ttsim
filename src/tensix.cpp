@@ -3188,7 +3188,6 @@ TENSIX_EXECUTE_UNPACR() {
 #endif
     TTSIM_VERIFY(ovrd_thread_id, UnsupportedFunctionality, "ovrd_thread_id=%d", ovrd_thread_id);
     TTSIM_VERIFY(!addr_cnt_context_id, UnsupportedFunctionality, "addr_cnt_context_id=%d", addr_cnt_context_id);
-    TTSIM_VERIFY(!cfg_context_id, UnsupportedFunctionality, "cfg_context_id=%d", cfg_context_id);
     TTSIM_VERIFY(!cfg_context_cnt_inc, UnsupportedFunctionality, "cfg_context_cnt_inc=%d", cfg_context_cnt_inc);
 
     uint32_t src_bank = unpack_block_selection ? p_tensix->src_b_unpack_bank : p_tensix->src_a_unpack_bank;
@@ -3199,10 +3198,19 @@ TENSIX_EXECUTE_UNPACR() {
 
     uint32_t state_id = get_state_id(p_tensix, pipe);
     const TensixConfigState *p_config = &p_tensix->config[state_id];
+    // TEN-3868's trailing zero fill publishes no SrcA data and advances no ADC.
+    // Its context number can add to an offset of 1, but no context data is used.
+    if (zero_write2 && !set_dat_valid && !unpack_block_selection && !addr_mode && cfg_context_id <= 1 &&
+        bits<3,0>(p_config->THCON_SEC0_REG0_TileDescriptor) == 0 &&
+        p_config->THCON_SEC0_REG2_Out_data_format == 0 &&
+        !(cfg_context_id ? p_config->THCON_SEC0_REG2_Unpack_if_sel_cntx1
+                        : p_config->THCON_SEC0_REG2_Unpack_if_sel_cntx0)) {
+        return true;
+    }
     uint32_t unpack_context = 0;
     if (ovrd_thread_id) {
-        unpack_context = unpack_block_selection ? p_tensix->thread[pipe].UNPACK_MISC_CFG_CfgContextOffset_1
-                                                : p_tensix->thread[pipe].UNPACK_MISC_CFG_CfgContextOffset_0;
+        unpack_context = cfg_context_id + (unpack_block_selection ? p_tensix->thread[pipe].UNPACK_MISC_CFG_CfgContextOffset_1
+                                                : p_tensix->thread[pipe].UNPACK_MISC_CFG_CfgContextOffset_0);
     }
     TTSIM_VERIFY(unpack_context <= 1, UnsupportedFunctionality, "unpack_context=%d", unpack_context);
 
@@ -3504,9 +3512,16 @@ TENSIX_EXECUTE_UNPACR() {
             value = uint32_t(bfp8_to_bf16(value, exp_bits)) << 16; // bfp8 -> bf16 -> fp32 in Src
         } else if (in_data_format == 0) { // fp32
             if (out_data_format == 0) { // fp32
-                TTSIM_VERIFY(unpack_to_dst, UndefinedBehavior, "unpack_to_dst=%d in_data_format=%d out_data_format=%d",
-                    unpack_to_dst, in_data_format, out_data_format);
-                value = dst_encode_fp32(value);
+                if (unpack_to_dst) {
+                    value = dst_encode_fp32(value);
+                } else {
+                    // TEN-3868: LLK follows unpack-to-dest with an unused SrcA write.
+                    // Keep readable fp32 Src unsupported; Src stores only TF32 precision.
+                    TTSIM_VERIFY(!set_dat_valid, UndefinedBehavior,
+                        "unpack_to_dst=%d in_data_format=%d out_data_format=%d",
+                        unpack_to_dst, in_data_format, out_data_format);
+                    value &= 0xFFFFE000;
+                }
             } else if (out_data_format == 1) { // fp16
                 TTSIM_VERIFY(!unpack_to_dst, UnsupportedFunctionality, "unpack_to_dst=%d in_data_format=%d out_data_format=%d",
                     unpack_to_dst, in_data_format, out_data_format);
@@ -3585,8 +3600,13 @@ TENSIX_EXECUTE_UNPACR() {
             }
         }
         if (zero_write2) {
-            TTSIM_ERROR(UntestedFunctionality, "zero_write2=%d", zero_write2);
-            value = 0;
+            // The unused TEN-3868 Src write also requests zero fill.
+            TTSIM_VERIFY(!unpack_to_dst && !unpack_block_selection && !set_dat_valid &&
+                in_data_format == 0 && out_data_format == 0,
+                UntestedFunctionality, "zero_write2=%d", zero_write2);
+            // TEN-3868 leaves a Dst address in the unpacker, possibly past SrcA.
+            // No Dvalid is published, so the workaround's zero fill is never read.
+            continue;
         }
         uint32_t row = (dst_addr + i) / ROW_SIZE;
         uint32_t col = (dst_addr + i) % ROW_SIZE;
