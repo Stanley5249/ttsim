@@ -43,6 +43,25 @@ def test_highest_version_ignores_draft_and_prerelease(monkeypatch: pytest.Monkey
     assert ci.select_tag("") == "v1.10.0"
 
 
+def test_patch_selection() -> None:
+    """v1.12.1 takes its own form of the patch, every other version takes unit-tick.patch, and each one exists."""
+    assert ci.patch_for("v1.12.1").name == "unit-tick-v1.12.1.patch"
+    for tag in ("v1.12.0", "v1.15.1", "v1.16.0"):
+        assert ci.patch_for(tag) == ci.PATCH
+    assert all(patch.is_file() for patch in [ci.PATCH, *ci.PATCHES.values()])
+
+
+@pytest.mark.parametrize("tag", ["v1.12.1", "v1.16.0"])
+def test_candidate_applies_the_patch_for_its_tag(monkeypatch: pytest.MonkeyPatch, tag: str) -> None:
+    """The candidate a build job rebuilds applies the patch selected by the upstream tag."""
+    run = Mock(return_value=Mock(returncode=0))
+    monkeypatch.setattr(ci, "run", run)
+    monkeypatch.setattr(ci, "git", Mock(return_value="candidate"))
+    ci.candidate(argparse.Namespace(upstream_tag=tag, upstream_sha="upstream", candidate="candidate"))
+    applied = [c.args for c in run.call_args_list if c.args[:2] == ("git", "am")]
+    assert applied == [("git", "am", "--committer-date-is-author-date", str(ci.patch_for(tag)))]
+
+
 def test_moved_upstream_tag_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     """A fork tag whose base differs from the current upstream tag stops the plan."""
 
@@ -124,6 +143,9 @@ def test_publish(
         assert len(publish_calls) == 1
         assert f"make_latest={str(not newer_release).lower()}" in publish_calls[0].args
         assert any(c.args[:3] == ("gh", "release", "upload") for c in run.call_args_list)
+        assert any(
+            "`.github/release/unit-tick.patch` (blob `patch`)" in arg for c in call.call_args_list for arg in c.args
+        )
     else:
         assert publish_calls == []
     assert f"  {ci.SUMS}" not in (tmp_path / ci.SUMS).read_text()

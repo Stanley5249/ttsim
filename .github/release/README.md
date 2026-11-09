@@ -8,7 +8,10 @@ Select `validate_only` on a manual run to build the candidate even when already
 released, without creating tags or releases. Scheduled runs always publish new
 versions after validation.
 
-`release.py` selects a version and applies `unit-tick.patch`. Every build
+`release.py` selects a version and applies `unit-tick.patch`, or the form of it
+that `PATCHES` names for that version. Upstream `v1.12.1` predates the eth busy
+steps, so it takes `unit-tick-v1.12.1.patch`, which changes only the Tensix tile
+loop. The build jobs get the upstream tag to pick the same patch. Every build
 job reconstructs the candidate and checks its commit SHA. Fixed commit metadata
 makes this reproducible without pushing temporary branches. Build jobs have
 read access only. The publishing job runs controller code, never candidate code.
@@ -37,9 +40,10 @@ changed patch output receives the next `steps.N`. No separate state store is
 needed. Network operations retry; deterministic failures recur on the next
 schedule until the controller or patch is fixed. Actions reports failures.
 
-Regenerate the patch using the command at the top of `release.py`. Versions for
-which this patch conflicts are not released; support requires adapting the
-patch. Do not suppress simulator error checks to make a release pass.
+Regenerate a patch using the command at the top of `release.py`. Versions for
+which the selected patch conflicts are not released; support requires adapting
+the patch and, for a form that only some versions take, adding the version to
+`PATCHES`. Do not suppress simulator error checks to make a release pass.
 
 Lint, type-check, and test the controller from `.github/release`. It is a uv
 project with dev tools locked in `uv.lock`. `scripts/check_style.py` skips its

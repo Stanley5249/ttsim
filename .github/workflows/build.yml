@@ -13,6 +13,9 @@ on:
   workflow_dispatch:
   workflow_call:
     inputs:
+      upstream_tag:
+        type: string
+        required: true
       upstream_sha:
         type: string
         required: true
@@ -73,10 +76,11 @@ jobs:
       if: inputs.candidate
       working-directory: .
       env:
+        UPSTREAM_TAG: ${{ inputs.upstream_tag }}
         UPSTREAM_SHA: ${{ inputs.upstream_sha }}
         CANDIDATE: ${{ inputs.candidate }}
       run: |
-        .github/release/release.py candidate "$UPSTREAM_SHA" "$CANDIDATE"
+        .github/release/release.py candidate "$UPSTREAM_TAG" "$UPSTREAM_SHA" "$CANDIDATE"
 
     - name: Run Style Checker
       run: |

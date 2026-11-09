@@ -1,0 +1,52 @@
+From da77e07832cfd3f82abc5e7903246397f048b57b Mon Sep 17 00:00:00 2001
+From: Stanley5249 <seer852741@gmail.com>
+Date: Tue, 10 Nov 2026 01:18:39 +0800
+Subject: [PATCH] Step each tile once per clock so a core never reads the same
+ time twice
+
+The wall clock registers return g_clock, which advances once per
+libttsim_clock call. Within one clock, upstream clocks a busy Tensix
+tile repeatedly while it executes Tensix instructions. Every one of
+those steps read the same wall clock, so code that timestamps events,
+such as the tt-metal device profiler, recorded distinct events at one
+time.
+
+Each Tensix tile now takes exactly one step per clock, as each eth
+core already does in this version. With one step per core per clock,
+g_clock already gives each step its own time, so the wall clock
+registers stay as upstream and the change adds no state. The cost is
+simulator speed: a busy tile needs more clocks to do the same work.
+
+This is unit-tick.patch for upstream releases from before a busy eth
+core took several steps per clock.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/libttsim.cpp | 7 +++----
+ 1 file changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/src/libttsim.cpp b/src/libttsim.cpp
+index bd5e611..1b6eb14 100644
+--- a/src/libttsim.cpp
++++ b/src/libttsim.cpp
+@@ -219,7 +219,8 @@ extern "C" API_EXPORT void libttsim_tile_wr_bytes(uint32_t x, uint32_t y, uint64
+ static void clock_current_chip() {
+     for (uint32_t tile_id = 0; tile_id < std::size(g_t_tiles); tile_id++) {
+         TensixTile *p_tile = &g_t_tiles[tile_id];
+-        // Hack: for simulator perf, we clock a tile repeatedly as long as it successfully executes at least one Tensix instruction
++        // Unit tick: a tile takes one step per clock, so each core reads a new wall clock value on every step.
++        // Upstream clocks a busy tile repeatedly for simulator perf, which repeats the wall clock within one clock.
+         for (;;) {
+             for (uint32_t rv32_mask = p_tile->rv32_cores_active; rv32_mask; rv32_mask &= rv32_mask - 1) {
+                 uint32_t rv32_index = __builtin_ctz(rv32_mask);
+@@ -244,9 +245,7 @@ static void clock_current_chip() {
+                     }
+                 }
+             }
+-            if (!any_tensix) {
+-                break; // no Tensix instructions executed, bail out
+-            }
++            break;
+         }
+     }
+     for (uint64_t rv32_mask = g_rv32_cores_active; rv32_mask; rv32_mask &= rv32_mask - 1) {
