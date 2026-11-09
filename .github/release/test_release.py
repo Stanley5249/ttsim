@@ -76,38 +76,53 @@ def test_moved_upstream_tag_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(ci, "select_tag", Mock(return_value="v1.0.0"))
     monkeypatch.setattr(ci, "resolve_upstream", Mock(return_value="moved-upstream"))
     monkeypatch.setattr(ci, "make_candidate", Mock(return_value="candidate"))
-    monkeypatch.setattr(ci, "run", Mock(return_value=Mock(returncode=1)))
+    monkeypatch.setattr(ci, "run", Mock())
     monkeypatch.setattr(ci, "git", git)
     with pytest.raises(SystemExit):
         ci.plan(argparse.Namespace(tag=""))
 
 
-def test_tag_with_several_commits_on_upstream_is_skipped(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+LEGACY_TAG, LEGACY_COMMIT, LEGACY_BASE = "v1.12.1-steps.1", *ci.LEGACY_TAGS["v1.12.1-steps.1"]
+
+
+@pytest.mark.parametrize(
+    ("tag_commit", "upstream", "expected"),
+    [
+        pytest.param(LEGACY_COMMIT, LEGACY_BASE, "v1.12.1-steps.2", id="legacy-tag-is-skipped"),
+        pytest.param(LEGACY_COMMIT, "moved-back-to-an-ancestor", None, id="moved-upstream-stops"),
+        pytest.param("moved-tag", LEGACY_BASE, None, id="moved-legacy-tag-stops"),
+    ],
+)
+def test_legacy_tag_is_skipped_only_at_its_recorded_commits(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tag_commit: str, upstream: str, expected: str
 ) -> None:
-    """A fork tag that contains upstream in more than one commit, such as v1.12.1-steps.1, gets the next suffix."""
+    """v1.12.1-steps.1, two commits on upstream, takes no part in the plan while it and upstream stay put."""
 
     def git(*args: str) -> str:
         if args[0] == "tag":
-            return "v1.12.1-steps.1"
-        return {"candidate^{tree}": "tree", "v1.12.1-steps.1^": "older-fork-commit"}[args[1]]
+            return LEGACY_TAG
+        return {"candidate^{tree}": "tree", f"{LEGACY_TAG}^{{commit}}": tag_commit}[args[1]]
 
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
     monkeypatch.setattr(ci, "select_tag", Mock(return_value="v1.12.1"))
-    monkeypatch.setattr(ci, "resolve_upstream", Mock(return_value="upstream"))
+    monkeypatch.setattr(ci, "resolve_upstream", Mock(return_value=upstream))
     monkeypatch.setattr(ci, "make_candidate", Mock(return_value="candidate"))
-    monkeypatch.setattr(ci, "run", Mock(return_value=Mock(returncode=0)))
+    monkeypatch.setattr(ci, "run", Mock())
     monkeypatch.setattr(ci, "git", git)
-    ci.plan(argparse.Namespace(tag=""))
-    assert "release_tag=v1.12.1-steps.2\n" in capsys.readouterr().out
+    if expected is None:
+        with pytest.raises(SystemExit):
+            ci.plan(argparse.Namespace(tag=""))
+    else:
+        ci.plan(argparse.Namespace(tag=""))
+        assert f"release_tag={expected}\n" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
     ("published", "tree", "commit", "expected"),
     [
         pytest.param(True, "tree", "candidate", "", id="published-release-of-this-tree-needs-none"),
-        pytest.param(False, "tree", "candidate", "v1.12.1-steps.1", id="tagged-unpublished-candidate-resumes"),
-        pytest.param(True, "old-tree", "old", "v1.12.1-steps.2", id="changed-tree-takes-the-next-suffix"),
+        pytest.param(False, "tree", "candidate", "v1.15.1-steps.1", id="tagged-unpublished-candidate-resumes"),
+        pytest.param(True, "old-tree", "old", "v1.15.1-steps.2", id="changed-tree-takes-the-next-suffix"),
     ],
 )
 def test_plan_matches_tags_by_tree(  # noqa: PLR0913  # pytest parameters
@@ -123,14 +138,14 @@ def test_plan_matches_tags_by_tree(  # noqa: PLR0913  # pytest parameters
 
     def git(*args: str) -> str:
         if args[0] == "tag":
-            return "v1.12.1-steps.1"
+            return "v1.15.1-steps.1"
         ref = args[1]
         if ref == "candidate^{tree}":
             return "tree"
-        return {"v1.12.1-steps.1^": "upstream", "v1.12.1-steps.1^{tree}": tree, "v1.12.1-steps.1^{commit}": commit}[ref]
+        return {"v1.15.1-steps.1^": "upstream", "v1.15.1-steps.1^{tree}": tree, "v1.15.1-steps.1^{commit}": commit}[ref]
 
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
-    monkeypatch.setattr(ci, "select_tag", Mock(return_value="v1.12.1"))
+    monkeypatch.setattr(ci, "select_tag", Mock(return_value="v1.15.1"))
     monkeypatch.setattr(ci, "resolve_upstream", Mock(return_value="upstream"))
     monkeypatch.setattr(ci, "make_candidate", Mock(return_value="candidate"))
     monkeypatch.setattr(ci, "run", Mock())
@@ -140,7 +155,7 @@ def test_plan_matches_tags_by_tree(  # noqa: PLR0913  # pytest parameters
     assert f"release_tag={expected}\n" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("upstream_tag", ["v1.0.0", "v1.12.1"])
+@pytest.mark.parametrize("upstream_tag", ["v1.0.0", "v1.15.1"])
 @pytest.mark.parametrize(
     ("draft", "valid_assets", "newer_release"),
     [

@@ -33,6 +33,11 @@ UPSTREAM_URL = f"https://github.com/{UPSTREAM_REPO}"
 PATCH = Path(__file__).resolve().with_name("unit-tick.patch")
 # Upstream versions that take another form of PATCH; v1.12.1 predates the eth busy steps that PATCH removes
 PATCHES = {"v1.12.1": PATCH.with_name("unit-tick-v1.12.1.patch")}
+# Fork tags from before every release was one patch commit on upstream, with the commit each tag and its upstream base
+# were at. A legacy tag is skipped only while both still match, so a moved upstream tag still stops the plan.
+LEGACY_TAGS = {
+    "v1.12.1-steps.1": ("e11f0592c8d95566a56f512464a9057c331c5b31", "ac0c840f7e314df2e5cf5a3082b80eee32080dca"),
+}
 CANDIDATE_DIR = "candidate"
 COMMITTER = {
     "GIT_COMMITTER_NAME": "github-actions[bot]",
@@ -190,12 +195,13 @@ def plan(args: argparse.Namespace) -> None:
     release_tag = f"{tag}-steps.{numbers[-1] + 1 if numbers else 1}"
     for n in numbers:
         steps_tag = f"{tag}-steps.{n}"
-        # Every fork tag is one patch commit on its upstream base. Refuse a moved upstream tag. v1.12.1-steps.1
-        # predates that rule and holds two commits on upstream, so a tag that still contains upstream only differs.
+        if steps_tag in LEGACY_TAGS:
+            if (git("rev-parse", f"{steps_tag}^{{commit}}"), upstream_sha) != LEGACY_TAGS[steps_tag]:
+                die(f"{steps_tag} or upstream {tag} moved from the commits recorded in LEGACY_TAGS")
+            log(f"{steps_tag} predates one-commit releases, so it is not this candidate")
+            continue
+        # Every fork tag is one patch commit on its upstream base. Refuse a moved upstream tag.
         if git("rev-parse", f"{steps_tag}^") != upstream_sha:
-            if run("git", "merge-base", "--is-ancestor", upstream_sha, steps_tag, check=False).returncode == 0:
-                log(f"{steps_tag} holds more than one commit on upstream {tag}, so it is not this candidate")
-                continue
             die(f"upstream {tag} no longer matches the base of {steps_tag}")
         if git("rev-parse", f"{steps_tag}^{{tree}}") != tree:
             continue
