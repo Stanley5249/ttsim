@@ -219,7 +219,8 @@ extern "C" API_EXPORT void libttsim_tile_wr_bytes(uint32_t x, uint32_t y, uint64
 static void clock_current_chip() {
     for (uint32_t tile_id = 0; tile_id < std::size(g_t_tiles); tile_id++) {
         TensixTile *p_tile = &g_t_tiles[tile_id];
-        // Hack: for simulator perf, we clock a tile repeatedly as long as it successfully executes at least one Tensix instruction
+        // Unit tick: a tile takes one step per clock, so each core reads a new wall clock value on every step.
+        // Upstream clocks a busy tile repeatedly for simulator perf, which repeats the wall clock within one clock.
         for (;;) {
             for (uint32_t rv32_mask = p_tile->rv32_cores_active; rv32_mask; rv32_mask &= rv32_mask - 1) {
                 uint32_t rv32_index = __builtin_ctz(rv32_mask);
@@ -244,9 +245,7 @@ static void clock_current_chip() {
                     }
                 }
             }
-            if (!any_tensix) {
-                break; // no Tensix instructions executed, bail out
-            }
+            break;
         }
     }
     for (uint64_t rv32_mask = g_rv32_cores_active; rv32_mask; rv32_mask &= rv32_mask - 1) {
