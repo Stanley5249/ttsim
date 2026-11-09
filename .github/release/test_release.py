@@ -83,6 +83,45 @@ def test_moved_upstream_tag_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.parametrize(
+    ("published", "tree", "commit", "expected"),
+    [
+        pytest.param(True, "tree", "candidate", "", id="published-release-of-this-tree-needs-none"),
+        pytest.param(False, "tree", "candidate", "v1.12.1-steps.1", id="tagged-unpublished-candidate-resumes"),
+        pytest.param(True, "old-tree", "old", "v1.12.1-steps.2", id="changed-tree-takes-the-next-suffix"),
+    ],
+)
+def test_plan_matches_tags_by_tree(  # noqa: PLR0913  # pytest parameters
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    published: bool,
+    tree: str,
+    commit: str,
+    expected: str,
+) -> None:
+    """A fork tag whose tree equals the candidate's is that release; another tree takes the next suffix."""
+
+    def git(*args: str) -> str:
+        if args[0] == "tag":
+            return "v1.12.1-steps.1"
+        ref = args[1]
+        if ref == "candidate^{tree}":
+            return "tree"
+        return {"v1.12.1-steps.1^": "upstream", "v1.12.1-steps.1^{tree}": tree, "v1.12.1-steps.1^{commit}": commit}[ref]
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setattr(ci, "select_tag", Mock(return_value="v1.12.1"))
+    monkeypatch.setattr(ci, "resolve_upstream", Mock(return_value="upstream"))
+    monkeypatch.setattr(ci, "make_candidate", Mock(return_value="candidate"))
+    monkeypatch.setattr(ci, "run", Mock())
+    monkeypatch.setattr(ci, "git", git)
+    monkeypatch.setattr(ci, "is_published", Mock(return_value=published))
+    ci.plan(argparse.Namespace(tag=""))
+    assert f"release_tag={expected}\n" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("upstream_tag", ["v1.0.0", "v1.12.1"])
+@pytest.mark.parametrize(
     ("draft", "valid_assets", "newer_release"),
     [
         pytest.param(True, True, True, id="resume-draft-without-taking-latest-from-newer-version"),
@@ -90,8 +129,14 @@ def test_moved_upstream_tag_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None
         pytest.param(False, False, False, id="public-release-with-changed-assets-fails-without-overwrite"),
     ],
 )
-def test_publish(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, draft: bool, valid_assets: bool, newer_release: bool
+def test_publish(  # noqa: PLR0913  # pytest parameters
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    upstream_tag: str,
+    *,
+    draft: bool,
+    valid_assets: bool,
+    newer_release: bool,
 ) -> None:
     """Publishing resumes drafts, verifies uploads, and never touches a public release."""
     for name in ci.REQUIRED_LIBS:
@@ -129,7 +174,7 @@ def test_publish(
     monkeypatch.setattr(ci, "list_releases", Mock(return_value=releases))
     monkeypatch.setattr(ci, "gh_api", call)
     args = argparse.Namespace(
-        dist=str(tmp_path), upstream_tag="v1.0.0", upstream_sha="upstream", candidate="candidate", release_tag=TAG
+        dist=str(tmp_path), upstream_tag=upstream_tag, upstream_sha="upstream", candidate="candidate", release_tag=TAG
     )
 
     if valid_assets:
@@ -144,7 +189,9 @@ def test_publish(
         assert f"make_latest={str(not newer_release).lower()}" in publish_calls[0].args
         assert any(c.args[:3] == ("gh", "release", "upload") for c in run.call_args_list)
         assert any(
-            "`.github/release/unit-tick.patch` (blob `patch`)" in arg for c in call.call_args_list for arg in c.args
+            f"`.github/release/{ci.patch_for(upstream_tag).name}` (blob `patch`)" in arg
+            for c in call.call_args_list
+            for arg in c.args
         )
     else:
         assert publish_calls == []
