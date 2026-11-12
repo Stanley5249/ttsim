@@ -54,7 +54,7 @@ tests:
 about:
   homepage: https://github.com/Stanley5249/ttsim
   repository: https://github.com/Stanley5249/ttsim
-  summary: Tenstorrent Wormhole and Blackhole simulator libraries with the stepping clock patch
+  summary: Tenstorrent Wormhole and Blackhole simulator libraries with the unit-tick wall clock patch
   license: Apache-2.0
   license_file:
     - LICENSE
