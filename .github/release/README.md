@@ -114,3 +114,21 @@ RELEASE_TAG=$tag TTSIM_DIST=$dist \
   rattler-build build --recipe .github/release/conda/recipe.yaml --output-dir "$out"
 gh release upload "$tag" -R Stanley5249/ttsim "$out"/linux-64/ttsim-*.conda
 ```
+
+## Native fp32 compute configurations
+
+Both unit-tick patch variants also accept the Wormhole LLK TEN-3868 trailing
+UNPACR. Float32-to-Float32 Src writes require Dvalid to remain clear and lose
+13 mantissa bits, like TF32. The trailing SrcA zero-fill is accepted only with
+these formats and no Dvalid. Readable Float32 Src writes still fail.
+An exact zero-fill workaround with no ADC increments is discarded before context
+selection because it publishes no data. Other UNPACR instructions select the
+instruction context plus the thread context offset; contexts
+above 1 remain rejected. The ISA model documents this selection but marks
+nonzero Wormhole contexts as weakly specified.
+
+`test_fp32_reload.py` is a workload regression requiring a separate ttnn
+runtime. Run it against each candidate with PROBE_FLAGS unset, fp32, and packer.
+K spans four blocks so the kernel must reload fp32 partial sums. The test checks
+successful completion, output shape, and finite results; it does not establish
+bit-exact numerical agreement with silicon.
