@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Builds the simulator on x86_64 and aarch64 to verify the public source remains buildable on every change.
-# The Release workflow calls it with a candidate, the upstream commit plus the fork patch, rebuilt in ./candidate.
+# Every build tests a candidate, the upstream commit plus the fork patch, rebuilt in ./candidate. The Release workflow
+# names it; pushes and pull requests plan the highest upstream release, as a release would.
 name: Build
 
 on:
@@ -55,6 +56,11 @@ jobs:
     - name: Test Release Decisions
       run: uv run --locked pytest
 
+    - name: Run Style Checker
+      working-directory: .
+      run: |
+        scripts/check_style.py
+
   build:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -62,9 +68,11 @@ jobs:
       fail-fast: false
       matrix:
         runner: [ubuntu-22.04, ubuntu-22.04-arm, ubuntu-24.04, ubuntu-24.04-arm]
+    permissions:
+      contents: read
     defaults:
       run:
-        working-directory: ${{ inputs.candidate && 'candidate' || '.' }}
+        working-directory: candidate
 
     steps:
     - name: Checkout Repository
@@ -73,14 +81,18 @@ jobs:
         persist-credentials: false
 
     - name: Rebuild Candidate
-      if: inputs.candidate
       working-directory: .
       env:
+        GH_TOKEN: ${{ github.token }}
         UPSTREAM_TAG: ${{ inputs.upstream_tag }}
         UPSTREAM_SHA: ${{ inputs.upstream_sha }}
         CANDIDATE: ${{ inputs.candidate }}
       run: |
-        .github/release/release.py candidate "$UPSTREAM_TAG" "$UPSTREAM_SHA" "$CANDIDATE"
+        if [ -n "$CANDIDATE" ]; then
+          .github/release/release.py candidate "$UPSTREAM_TAG" "$UPSTREAM_SHA" "$CANDIDATE"
+        else
+          .github/release/release.py plan
+        fi
 
     - name: Run Style Checker
       run: |
