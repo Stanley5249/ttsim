@@ -249,8 +249,7 @@ static void clock_current_chip() {
     // clocked this cycle.
     for (uint32_t tile_id = next_busy_t_tile(0); tile_id < NUM_T_TILES; tile_id = next_busy_t_tile(tile_id + 1)) {
         TensixTile *p_tile = &g_t_tiles[tile_id];
-        // Unit tick: a tile takes one step per clock, so each core reads a new wall clock value on every step.
-        // Upstream clocks a busy tile repeatedly for simulator perf, which repeats the wall clock within one clock.
+        // Hack: for simulator perf, we clock a tile repeatedly as long as it successfully executes at least one Tensix instruction
         for (;;) {
             for (uint32_t rv32_mask = p_tile->rv32_cores_active; rv32_mask; rv32_mask &= rv32_mask - 1) {
                 uint32_t rv32_index = __builtin_ctz(rv32_mask);
@@ -278,7 +277,9 @@ static void clock_current_chip() {
                     }
                 }
             }
-            break;
+            if (!any_tensix) {
+                break; // no Tensix instructions executed, bail out
+            }
         }
         if (!t_tile_active(p_tile)) {
             g_t_tiles_busy[tile_id / 64] &= ~(1ull << (tile_id % 64));
@@ -289,8 +290,9 @@ static void clock_current_chip() {
         uint32_t tile_id = core_index / RV32_CORES_PER_E_TILE;
         uint32_t rv32_index = core_index % RV32_CORES_PER_E_TILE;
         auto *p_hart = &g_e_tiles[tile_id].rv32[rv32_index];
-        // Unit tick: an eth core takes one step per clock, busy or not (upstream gives a busy one several)
-        uint32_t steps = 1;
+        // Hack: for simulator perf, an eth core busy lately (its sram written to, or it issued a NOC or eth command)
+        // takes several steps per clock, so relayed traffic doesn't wait on it; an idle one takes one
+        uint32_t steps = (g_clock < g_e_tiles[tile_id].busy_until) ? ETH_BUSY_STEPS : 1;
         for (uint32_t i = 0; (i < steps) && ((g_rv32_cores_active >> core_index) & 1); i++) {
             rv32_step(p_hart);
         }
