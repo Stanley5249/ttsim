@@ -20,11 +20,19 @@ The patch steps each Tensix tile and each eth core once per clock. Upstream
 clocks a busy tile repeatedly within one clock and gives a busy eth core
 several steps, so a core read the same wall clock on several steps. The wall
 clock registers stay as upstream and return `g_clock`, which now gives every
-step of a core its own time. Simulation runs slower in exchange. Tags keep the
-`-steps.N` suffix of the earlier `stepping-clock.patch`, which counted steps in
-the wall clock instead.
+step of a core its own time. Simulation runs slower in exchange.
+
+Tags keep the `-steps.N` suffix of the earlier `stepping-clock.patch`, which
+counted steps in the wall clock instead. `v1.11.1`, `v1.14.0`, and `v1.15.0`
+`-steps.1`, and `-steps.1` of `v1.12.1`, `v1.15.1`, and `v1.16.0`, use that
+stepping clock. `v1.12.1-steps.2`, `v1.15.1-steps.2`, and `v1.16.0-steps.2` use
+unit tick, and `v1.12.1-steps.3` and `v1.16.0-steps.3` add the fp32 fix below.
+Each release's notes name its patch file and blob.
 
 The existing four OS/CPU build jobs run style and wall-clock behavior checks.
+Pushes and pull requests build the same candidate a release would, the highest
+upstream release with its patch, so they test the patch, not `src/` on `main`,
+which stays equal to upstream.
 Ubuntu 24.04 artifacts supply the release libraries. Publishing creates a draft,
 checks asset sizes and hashes, then makes it public automatically. Old-version
 backfills do not take the latest label from a newer version.
