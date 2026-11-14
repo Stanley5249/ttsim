@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <algorithm>
 #include <bit>
 #include <iterator>
 
@@ -95,6 +96,12 @@ template<class T> [[nodiscard]] T mem_rd(const void *p) {
 }
 template<class T> void mem_wr(void *p, T data) {
     memcpy(p, &data, sizeof(data));
+}
+
+// Whether [addr, addr + size) lies within [0, limit). The sum is never formed, so an address or size the guest supplies
+// can't wrap around past the check.
+[[nodiscard]] constexpr bool in_bounds(uint64_t addr, uint64_t size, uint64_t limit) {
+    return (addr <= limit) && (size <= limit - addr);
 }
 
 const char *ttsim_error_category_name(TTSimErrorCategory category);

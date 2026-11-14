@@ -21,8 +21,8 @@ Quasar is pre-silicon and ships as a binary only.
   tt-forge, and LLK examples/tests, as well as entire LLMs and other AI models.
 
 - **Wormhole/Blackhole multichip**: `wh_x2` (N300), `wh_x8` (T3000/LoudBox), `wh_x32` (WH Galaxy),
-  `bh_x2` (P300), `bh_x4` (two P300 cards), and `bh_x32` (BH Galaxy) configs are available, with
-  significant numbers of Ethernet, multidevice, and fabric tests passing.
+  `bh_x2` (P300), `bh_x4` (QuietBox 2: two P300 cards), and `bh_x32` (BH Galaxy) configs are available,
+  each its own binary. Testing status is under [Known Issues](#known-issues).
 
 - **Quasar**: Approaching feature complete and now alpha quality for slow dispatch mode. Some features
   remain, but the bulk of core Tensix and DM functionality is present and well tested. Can run many
@@ -48,7 +48,8 @@ wget https://github.com/tenstorrent/ttsim/releases/download/vX.Y/libttsim_bh.so
 wget https://github.com/tenstorrent/ttsim/releases/download/vX.Y/libttsim_qsr.so
 ```
 
-Linux/aarch64 binary releases are suffixed with `_aarch64`, e.g., `libttsim_wh_aarch64.so`.
+Multichip binaries are named by config, e.g., `libttsim_wh_x2.so`. Linux/aarch64 binary releases are suffixed
+with `_aarch64`, e.g., `libttsim_wh_aarch64.so`.
 
 ### Building from Source (Wormhole and Blackhole)
 The included source can be built locally:
@@ -66,32 +67,30 @@ For the `libttsim.so` programmatic interface - the exported C entry points, the 
 compatibility policy that governs them - see [libttsim API and ABI](docs/libttsim_api.md).
 
 ### Running with TT-Metalium
-Metal has simulator support out of the box, enabled by setting the `TT_METAL_SIMULATOR`
-environment variable to point to the simulator .so file. The `libttsim.so` must live in
-a directory also containing an SOC descriptor YAML file.
+Metal has simulator support out of the box: set the `TT_METAL_SIMULATOR` environment variable to the simulator
+`.so` file, either a downloaded one or one you built (e.g., `src/_out/release_wh/libttsim.so`).
 
-#### Wormhole
+#### Wormhole and Blackhole
 ```bash
-export TT_METAL_SIMULATOR=~/sim/libttsim_wh.so
-cp $TT_METAL_HOME/tt_metal/soc_descriptors/wormhole_b0_80_arch.yaml ~/sim/soc_descriptor.yaml
+export TT_METAL_SIMULATOR=~/sim/libttsim_wh.so # or libttsim_bh.so, or a multichip binary
 
 cd $TT_METAL_HOME
 TT_METAL_SLOW_DISPATCH_MODE=1 ./build/programming_examples/metal_example_add_2_integers_in_riscv
 ```
 
-#### Blackhole
-```bash
-export TT_METAL_SIMULATOR=~/sim/libttsim_bh.so
-cp $TT_METAL_HOME/tt_metal/soc_descriptors/blackhole_140_arch.yaml ~/sim/soc_descriptor.yaml
-
-cd $TT_METAL_HOME
-TT_METAL_SLOW_DISPATCH_MODE=1 ./build/programming_examples/metal_example_add_2_integers_in_riscv
-```
+Wormhole and Blackhole need no SoC descriptor as of tt-metal 5028883 (#62711, first in v0.83.0-dev20261105):
+tt-metal reads the architecture from the PCI device ID the simulator reports, and on a multichip binary it finds the
+chips and their Ethernet links the way it does on silicon. Older tt-metal, and LLK tests (tt-exalens still reads it),
+need `wormhole_b0_80_arch.yaml` or `blackhole_140_arch.yaml` from `$TT_METAL_HOME/tt_metal/soc_descriptors/` copied
+beside the `.so` as `soc_descriptor.yaml`. A `soc_descriptor.yaml` there always takes precedence, so delete any left
+over from older instructions.
 
 #### Quasar
+Quasar still needs its SoC descriptor beside the `.so`, so give it a directory of its own:
 ```bash
-export TT_METAL_SIMULATOR=~/sim/libttsim_qsr.so
-cp $TT_METAL_HOME/tt_metal/soc_descriptors/quasar_32_arch.yaml ~/sim/soc_descriptor.yaml
+mkdir -p ~/sim/qsr && mv ~/sim/libttsim_qsr.so ~/sim/qsr/
+cp $TT_METAL_HOME/tt_metal/soc_descriptors/quasar_32_arch_ttsim.yaml ~/sim/qsr/soc_descriptor.yaml
+export TT_METAL_SIMULATOR=~/sim/qsr/libttsim_qsr.so
 
 cd $TT_METAL_HOME
 TT_METAL_SLOW_DISPATCH_MODE=1 ./build/test/tt_metal/unit_tests_legacy --gtest_filter=QuasarMeshDeviceSingleCardFixture.SingleDmL1Write
@@ -122,7 +121,7 @@ real, from the prompt down to the instructions issued on a Tensix tile.
 
 A host-side bit-exact device proxy acts as the reference: `--check` requires every logit produced
 under `--sim` to match it bit-for-bit, the same standard `ttsim` holds itself to
-[against silicon](#numerical-accuracy). Editing a kernel and re-checking a full 24-layer model
+[against silicon](#numerical-accuracy-timing-and-ordering). Editing a kernel and re-checking a full 24-layer model
 against an exact reference needs no silicon at all.
 
 See tt-lab's README for model downloads, the requantization step, and its simulator compatibility
@@ -140,21 +139,34 @@ cd ttsim-qemu
 ./configure --target-list=x86_64-softmmu && make -j$(nproc)
 ```
 
-Run, with the appropriate `bar4-size` for the chip (Wormhole: `32M`, Blackhole: `32G`):
+Run, with the BAR sizes for the chip:
+
+| Chip | `bar0-size` | `bar4-size` |
+| --- | --- | --- |
+| Wormhole | `512M` (default) | `32M` |
+| Blackhole | `512M` (default) | `32G` |
+| Quasar | `4G` | `512G` |
+
 ```bash
 qemu-system-x86_64 ... \
-    -device ttsim,lib=/path/to/libttsim.so,bar4-size=32M
+    -device ttsim,lib=/path/to/libttsim.so,bar0-size=512M,bar4-size=32M
+```
+
+On Quasar, libttsim implements the host MMIO path through its PCIe device:
+```bash
+qemu-system-x86_64 ... \
+    -device ttsim,lib=/path/to/libttsim.so,bar0-size=4G,bar4-size=512G
 ```
 
 A multi-chip `libttsim.so` (e.g. `wh_x32`/`bh_x32`, or the 4-MMIO `wh_x8`) presents several
 host-visible chips through the one process-wide library. Add one `-device ttsim` per MMIO chip,
-all pointing at the same library; each surfaces as its own PCI device and, in the guest, its own
-`/dev/tenstorrent/N`. Devices auto-assign the lowest free chip number (or pass `index=N` to pin
-one):
+all pointing at the same library and using the BAR sizes for the chip (Wormhole shown); each
+surfaces as its own PCI device and, in the guest, its own `/dev/tenstorrent/N`. Devices auto-assign
+the lowest free chip number (or pass `index=N` to pin one):
 ```bash
 qemu-system-x86_64 ... \
-    -device ttsim,lib=/path/to/libttsim.so,bar4-size=32M \
-    -device ttsim,lib=/path/to/libttsim.so,bar4-size=32M   # repeat NUM_MMIO_CHIPS times
+    -device ttsim,lib=/path/to/libttsim.so,bar0-size=512M,bar4-size=32M \
+    -device ttsim,lib=/path/to/libttsim.so,bar0-size=512M,bar4-size=32M   # repeat NUM_MMIO_CHIPS times
 ```
 
 Inside the guest, build and load `tt-kmd` to surface `/dev/tenstorrent/0`:
@@ -165,8 +177,6 @@ sudo insmod tenstorrent.ko
 ```
 
 `qemu-system-aarch64` is also supported and will be faster on ARM-based host platforms.
-
-On Quasar, libttsim implements the host MMIO path through its PCIe device's BARs. Its BAR4 is 512GB.
 
 ## Full-System Simulation with ttsim-riscv64
 Where the `libttsim.so` path models a Tenstorrent *chip*, **ttsim-riscv64** is the other face of
@@ -183,15 +193,25 @@ Build:
 The released ttsim-riscv64 binaries are built on Ubuntu 24.04 and need glibc 2.38 or newer (Ubuntu 24.04 or
 later). On Ubuntu 22.04, build it from source as above.
 
-Boot Linux (OpenSBI `fw_jump` firmware + a kernel `Image` + initramfs + a flattened device tree), e.g.
-an 8-hart SMP boot with a virtio-blk disk and an interactive console:
+Boot Linux (OpenSBI `fw_dynamic` firmware + a kernel `Image` + a flattened device tree), e.g. an 8-hart SMP
+boot with a virtio-blk disk and an interactive console:
 ```bash
 src/_out/release_riscv64/ttsim --harts 8 -i \
     --entry 0x80000000 --set-reg a0 0 --set-reg a1 0x88800000 \
-    --load-bin fw_jump.bin 0x80000000 --load-bin Image      0x80200000 \
-    --load-bin initrd.img  0x84000000 --load-bin board.dtb  0x88800000 \
+    --fw-dynamic-next 0x80200000 \
+    --load-bin fw_dynamic.bin 0x80000000 --load-bin Image 0x80200000 \
+    --load-bin board.dtb 0x88800000 \
     --disk disk.img
 ```
+
+A kernel with its disk driver and filesystem built in (like the one [docs/riscv64_image.md](docs/riscv64_image.md)
+builds) mounts `root=/dev/vda` itself, so no initrd is needed. To boot your own initrd, add
+`--load-bin initrd.img 0x84000000` and give the DTB's `/chosen` node `linux,initrd-start` and `linux,initrd-end`
+properties for where it lies in memory.
+
+`--fw-dynamic-next <addr>` gives OpenSBI's `fw_dynamic` the kernel's address and leaves the device tree where
+`a1` points. `fw_jump.bin` boots too, without the option, but it copies the device tree to 0x82200000, which
+overwrites part of a kernel image larger than 32 MiB (Ubuntu's riscv64 kernel is 43.7 MB).
 
 `-i` attaches the simulated UART console to your terminal. Ctrl-C is hooked and passed into the
 simulator, so use Ctrl-\ if you need to forcibly exit.
@@ -202,6 +222,10 @@ write them to the image file itself.
 `--stop-on-uart-text <text>` ends the run when the console output contains `<text>` (e.g. the shell prompt) and
 prints the instruction count and wall time at that point, to measure boot time.
 
+[docs/riscv64_image.md](docs/riscv64_image.md) shows how to build a bootable Ubuntu image (firmware, kernel and
+disk image, no initrd) from scratch: no root or QEMU needed, and byte-for-byte reproducible. It needs ttsim
+v1.16.0 or later.
+
 Note that your .dtb must declare more harts in order for Linux to use them.
 
 ### Bringing up a Tenstorrent chip inside the guest
@@ -210,7 +234,7 @@ the chip model and presents it to the guest as a PCIe endpoint - an ECAM config 
 BAR windows - just as [ttsim-qemu](#running-ttsim-as-a-qemu-pci-device) does for QEMU. The guest device
 tree must declare a `pci-host-ecam-generic` bus at the ECAM base at `0x30000000`. Then
 [tt-kmd](https://github.com/tenstorrent/tt-kmd) binds to it and exposes `/dev/tenstorrent/0`, providing
-you with a entire simulated RISC-V computer with an AI hardware accelerator, running Linux - all in just
+you with an entire simulated RISC-V computer with an AI hardware accelerator, running Linux - all in just
 a few hundred KB of total simulator code, and with no external dependencies beyond libc.
 
 ```bash
@@ -220,13 +244,15 @@ a few hundred KB of total simulator code, and with no external dependencies beyo
 # Boot Linux with the Wormhole chip attached over (simulated) PCIe -- the DTB declares the ECAM bus:
 src/_out/release_riscv64/ttsim -i \
     --entry 0x80000000 --set-reg a0 0 --set-reg a1 0x88800000 \
-    --load-bin fw_jump.bin 0x80000000 --load-bin Image      0x80200000 \
-    --load-bin initrd.img  0x84000000 --load-bin board.dtb  0x88800000 \
+    --fw-dynamic-next 0x80200000 \
+    --load-bin fw_dynamic.bin 0x80000000 --load-bin Image      0x80200000 \
+    --load-bin board.dtb  0x88800000 \
     --tt-device src/_out/release_wh/libttsim.so --disk disk.img
 ```
 
-Make sure your disk.img is already pre-populated with `build-essential linux-headers-generic` and
-the tt-kmd source. Inside the guest, build and load `tt-kmd` exactly as for the QEMU path above:
+Make sure your disk.img is already pre-populated with `build-essential linux-headers-generic` (the image
+[docs/riscv64_image.md](docs/riscv64_image.md) builds has both) and the tt-kmd source. Inside the guest, build
+and load `tt-kmd` exactly as for the QEMU path above:
 ```bash
 cd tt-kmd && make
 sudo insmod tenstorrent.ko # surfaces /dev/tenstorrent/0
@@ -240,18 +266,10 @@ mode of operation. Set `TT_METAL_SLOW_DISPATCH_MODE=1` to enable it.
 
 SFPLOADMACRO is not supported in the SFPU. Set `TT_METAL_DISABLE_SFPLOADMACRO=1` to disable its usage.
 
-Multichip support and testing is incomplete. UMD changes for full support are not yet fully merged
-for platforms beyond `wh_x2`, though enablement for additional targets is in progress, and the
-`micah/native-sim` branch of `tt-metal` was verified against the `wh_x2`, `wh_x8`, `wh_x32`,
-`bh_x2`, and `bh_x32` simulator builds. Set the `TT_METAL_MOCK_CLUSTER_DESC_PATH` environment
-variable to point to a valid cluster .yaml (e.g.
-`tt_metal/third_party/umd/tests/cluster_descriptor_examples/wormhole_N300.yaml` or
-`tt_metal/third_party/umd/tests/cluster_descriptor_examples/blackhole_P300_both_mmio.yaml`)
-when running tt-metal tests. An example of a test that has been validated to run on N300, P300, T3000,
-WH Galaxy, and BH Galaxy and not only pass but also dispatch work to all chips in both SD and FD mode is
-`tests/ttnn/unit_tests/base_functionality/test_multi_device.py::test_multi_device_single_op_binary`.
-The `bh_x32` binary is x86_64 only at present due to aarch64 linker limitations with the extremely large
-BSS segment this requires.
+Multichip testing is incomplete. Nearly every tt-metal C++ test runs in our CI on `wh_x2` and `bh_x2`, and
+a Galaxy smoke set runs on `wh_x32` and `bh_x32` (in tt-metal's CI too); `wh_x8` and `bh_x4` are covered only by
+our own Ethernet link tests. Fabric smoke tests pass on `bh_x2`; the larger fabric suites are too slow under the
+simulator for now. The `bh_x32` binary is x86_64 only, since aarch64 can't link its extremely large BSS segment.
 
 Not all hardware features are implemented, and the simulator is intentionally more restrictive than silicon
 to help uncover potential issues. Simulator error messages are grouped into the following categories
@@ -287,7 +305,7 @@ The same discipline also serves academic and educational use of `ttsim` as a ref
 AI-accelerator microarchitecture, where legibility to an outside reader overlaps heavily with what
 safety auditors need.
 
-### Numerical Accuracy
+### Numerical Accuracy, Timing, and Ordering
 `ttsim` is designed to provide **bit-exact** numerical results relative to silicon for all
 computations, floating point and otherwise. The goal is to match all hardware computations
 bit-for-bit across all instructions, opcodes, functional units, and special cases, including
@@ -303,11 +321,12 @@ Most code will achieve bit-exact results, but cases that can produce divergent r
 - Execution of UndefinedBehavior or UnpredictableValue cases.
 - Any other violations of ISA specification requirements.
 
-For timing-dependent computations, `ttsim` may evaluate operations in any order permitted by
-software synchronization. This may include operation orders that are extremely unlikely on silicon.
-To ensure an exact match with silicon, avoid algorithms where the runtime order of operations
-affects the result. For example, floating-point reductions using addition will diverge unless each
-addition is explicitly serialized in a deterministic order.
+`ttsim` is not cycle-accurate. Where timing is not fixed by the ISA and software synchronization,
+it may complete operations, make writes visible, and order events in any way they permit, including
+ways that are extremely unlikely on silicon; software that is correct only under silicon's usual
+timing is outside this contract. To ensure an exact match with silicon, avoid algorithms where the
+runtime order of operations affects the result. For example, floating-point reductions using
+addition will diverge unless each addition is explicitly serialized in a deterministic order.
 
 ### Strictness vs. Silicon
 The simulator may report `UndefinedBehavior` or `UnpredictableValue` for conditions that do not
