@@ -3,6 +3,9 @@
 name = "ttsim-conda"
 channels = ["conda-forge"]
 platforms = ["linux-64"]
+# One exact pixi release, which the Release workflow repeats in pixi-version and
+# pixi rejects if it differs: pixi has changed the lock format between releases.
+requires-pixi = "==0.84.2"
 
 [dependencies]
 rattler-build = "==0.80.0"
