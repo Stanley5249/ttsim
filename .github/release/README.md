@@ -29,7 +29,7 @@ stepping clock. `v1.12.1-steps.2`, `v1.15.1-steps.2`, and `v1.16.0-steps.2` use
 unit tick, and `v1.12.1-steps.3` and `v1.16.0-steps.3` add the fp32 fix below.
 Each release's notes name its patch file and blob.
 
-The existing four OS/CPU build jobs run style and wall-clock behavior checks.
+The two Ubuntu 24.04 build jobs, x86_64 and aarch64, run style and wall-clock behavior checks.
 Pushes and pull requests build the same candidate a release would, the highest
 upstream release with its patch, so they test the patch, not `src/` on `main`,
 which stays equal to upstream.

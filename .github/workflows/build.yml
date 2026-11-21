@@ -65,7 +65,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-22.04, ubuntu-22.04-arm, ubuntu-24.04, ubuntu-24.04-arm]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     permissions:
       contents: read
     defaults:
@@ -110,9 +110,9 @@ jobs:
           python3 "$GITHUB_WORKSPACE/.github/release/test_wall_clock.py" "src/_out/release_$chip/libttsim.so"
         done
 
-    # Releases ship the Ubuntu 24.04 libraries, named like the upstream assets (libttsim_wh.so, libttsim_wh_aarch64.so, ...)
+    # Releases ship these libraries, named like the upstream assets (libttsim_wh.so, libttsim_wh_aarch64.so, ...)
     - name: Collect Libraries
-      if: inputs.candidate && startsWith(matrix.runner, 'ubuntu-24.04')
+      if: inputs.candidate
       env:
         SUFFIX: ${{ runner.arch == 'ARM64' && '_aarch64' || '' }}
       run: |
@@ -124,7 +124,7 @@ jobs:
         sha256sum "$GITHUB_WORKSPACE"/dist/*
 
     - uses: actions/upload-artifact@v7
-      if: inputs.candidate && startsWith(matrix.runner, 'ubuntu-24.04')
+      if: inputs.candidate
       with:
         name: libs-${{ matrix.runner }}
         path: dist/
