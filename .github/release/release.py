@@ -242,12 +242,15 @@ def verify_assets(release: Release, files: list[Path]) -> None:
 
 
 def write_sums(dist: Path) -> tuple[list[Path], str]:
-    """Check the required libraries, write SHA256SUMS, and return every file to upload with the sums."""
+    """Check the required libraries and conda package, write SHA256SUMS, and return the files to upload."""
     libs = sorted(path for path in dist.iterdir() if path.name != SUMS)
     for name in REQUIRED_LIBS:
         path = dist / name
         if not path.is_file() or path.stat().st_size == 0:
             die(f"{name} is missing or empty")
+    packages = [path for path in libs if path.suffix == ".conda" and path.stat().st_size > 0]
+    if len(packages) != 1:
+        die(f"expected one non-empty conda package in {dist}, found {[p.name for p in packages]}")
     sums = "".join(f"{sha256(path)}  {path.name}\n" for path in libs)
     (dist / SUMS).write_bytes(sums.encode())
     return [*libs, dist / SUMS], sums

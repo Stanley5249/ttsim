@@ -49,9 +49,8 @@ needed. Network operations retry; deterministic failures recur on the next
 schedule until the controller or patch is fixed. Actions reports failures.
 
 Regenerate a patch using the command at the top of `release.py`. Versions for
-which the selected patch conflicts are not released; support requires adapting
-the patch and, for a form that only some versions take, adding the version to
-`PATCHES`. Do not suppress simulator error checks to make a release pass.
+which the patch conflicts are not released; support requires adapting
+`unit-tick.patch` to them. Do not suppress simulator error checks to make a release pass.
 
 Lint, type-check, and test the controller from `.github/release`. It is a uv
 project with dev tools locked in `uv.lock`. `scripts/check_style.py` skips its

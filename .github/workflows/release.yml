@@ -1,6 +1,5 @@
 # Releases each new upstream tenstorrent/ttsim vX.Y.Z release as vX.Y.Z-steps.N: the upstream commit with
-# .github/release/unit-tick.patch, or the form that release.py names for that version, applied, built and tested by the
-# Build workflow, and published with upstream's asset names (libttsim_wh.so, libttsim_wh_aarch64.so, ...) so tools
+# .github/release/unit-tick.patch applied, built and tested by the Build workflow, and published with upstream's asset names (libttsim_wh.so, libttsim_wh_aarch64.so, ...) so tools
 # that download upstream releases can point here.
 # The daily run takes the highest upstream release and stops early once that is released; a manual run may name an
 # older one to backfill. Upstream code never runs with write access: the publish job only applies the patch and uploads.
@@ -73,11 +72,11 @@ jobs:
       with:
         persist-credentials: false
 
+    # The package holds the x86_64 libraries only.
     - uses: actions/download-artifact@v8
       with:
-        pattern: libs-*
+        name: libs-ubuntu-24.04
         path: dist
-        merge-multiple: true
 
     - uses: prefix-dev/setup-pixi@v0.11.3
       with:

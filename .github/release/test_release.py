@@ -176,6 +176,7 @@ def test_publish(  # noqa: PLR0913  # pytest parameters
     """Publishing resumes drafts, verifies uploads, and never touches a public release."""
     for name in ci.REQUIRED_LIBS:
         (tmp_path / name).write_bytes(b"library")
+    (tmp_path / "ttsim-1.0.0+steps.1-0.conda").write_bytes(b"package")
     # A rerun must regenerate this file, not include its own previous hash
     (tmp_path / ci.SUMS).write_text("stale")
     record = release(TAG, draft=draft)
@@ -231,3 +232,14 @@ def test_publish(  # noqa: PLR0913  # pytest parameters
     else:
         assert publish_calls == []
     assert f"  {ci.SUMS}" not in (tmp_path / ci.SUMS).read_text()
+
+
+def test_release_needs_its_conda_package(tmp_path: Path) -> None:
+    """A release whose conda package is missing stops before anything is uploaded."""
+    for name in ci.REQUIRED_LIBS:
+        (tmp_path / name).write_bytes(b"library")
+    with pytest.raises(SystemExit):
+        ci.write_sums(tmp_path)
+    (tmp_path / "ttsim-1.0.0+steps.1-0.conda").write_bytes(b"package")
+    files, _ = ci.write_sums(tmp_path)
+    assert tmp_path / "ttsim-1.0.0+steps.1-0.conda" in files

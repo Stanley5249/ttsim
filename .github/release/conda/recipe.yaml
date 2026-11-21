@@ -34,12 +34,7 @@ build:
     shopt -s nullglob
     for chip in wh bh; do
       mkdir -p "$PREFIX/lib/ttsim/$chip"
-      for lib in "libttsim_$chip.so" libttsim_${chip}_x*.so; do
-        case "$lib" in
-          *_aarch64.so) ;;
-          *) cp "$lib" "$PREFIX/lib/ttsim/$chip/" ;;
-        esac
-      done
+      cp "libttsim_$chip.so" libttsim_${chip}_x*.so "$PREFIX/lib/ttsim/$chip/"
     done
 
 tests:
@@ -48,8 +43,6 @@ tests:
         exists:
           - lib/ttsim/wh/libttsim_wh.so
           - lib/ttsim/bh/libttsim_bh.so
-        not_exists:
-          - lib/ttsim/**/*_aarch64.so
 
 about:
   homepage: https://github.com/Stanley5249/ttsim
