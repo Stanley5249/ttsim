@@ -92,7 +92,7 @@ Each release also carries `ttsim-X.Y.Z+steps.N-0.conda` for `linux-64`,
 because conda versions cannot contain `-`. It installs the x86_64 libraries
 byte for byte as `lib/ttsim/{wh,bh}/libttsim_<chip>[_xN].so`. Consumers pin it
 by URL and sha256, which the publish job prints in its summary. The `package`
-job builds it with the rattler-build that `conda/pixi.lock` locks, and the
+job builds it with rattler-build 0.80 through `pixi exec`, and the
 publish job uploads and verifies it with the libraries in the same draft.
 
 The package ships no `soc_descriptor.yaml`. tt-metal owns its descriptors, also
@@ -118,7 +118,7 @@ gh api "repos/Stanley5249/ttsim/releases/tags/$tag" \
 gh release download "$tag" -R Stanley5249/ttsim --pattern 'libttsim_*.so' --dir "$dist"
 (cd "$dist" && sha256sum --check --strict SHA256SUMS)
 RELEASE_TAG=$tag TTSIM_DIST=$dist \
-  pixi run --locked --manifest-path .github/release/conda/pixi.toml \
+  pixi exec -s "rattler-build 0.80.*" -- \
   rattler-build build --recipe .github/release/conda/recipe.yaml --output-dir "$out"
 gh release upload "$tag" -R Stanley5249/ttsim "$out"/linux-64/ttsim-*.conda
 ```

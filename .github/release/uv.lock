@@ -209,9 +209,9 @@ dev = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "pyrefly", specifier = "==1.4.0" },
-    { name = "pytest", specifier = "==9.2.0" },
-    { name = "ruff", specifier = "==0.17.3" },
+    { name = "pyrefly" },
+    { name = "pytest" },
+    { name = "ruff" },
 ]
 
 [[package]]

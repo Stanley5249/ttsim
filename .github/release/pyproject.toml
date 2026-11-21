@@ -7,9 +7,9 @@ dependencies = []
 
 [dependency-groups]
 dev = [
-    "pyrefly==1.4.0",
-    "pytest==9.2.0",
-    "ruff==0.17.3",
+    "pyrefly",
+    "pytest",
+    "ruff",
 ]
 
 [tool.uv]
