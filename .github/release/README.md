@@ -116,6 +116,7 @@ gh api "repos/Stanley5249/ttsim/releases/tags/$tag" \
   > "$dist/SHA256SUMS"
 gh release download "$tag" -R Stanley5249/ttsim --pattern 'libttsim_*.so' --dir "$dist"
 (cd "$dist" && sha256sum --check --strict SHA256SUMS)
+rm "$dist"/*_aarch64.so  # the package holds the x86_64 libraries only
 RELEASE_TAG=$tag TTSIM_DIST=$dist \
   pixi exec -s "rattler-build 0.80.*" -- \
   rattler-build build --recipe .github/release/conda/recipe.yaml --output-dir "$out"

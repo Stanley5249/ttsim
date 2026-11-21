@@ -243,3 +243,7 @@ def test_release_needs_its_conda_package(tmp_path: Path) -> None:
     (tmp_path / "ttsim-1.0.0+steps.1-0.conda").write_bytes(b"package")
     files, _ = ci.write_sums(tmp_path)
     assert tmp_path / "ttsim-1.0.0+steps.1-0.conda" in files
+    # An extra package, even an empty one, is not this release's.
+    (tmp_path / "ttsim-1.0.0+steps.1-1.conda").write_bytes(b"")
+    with pytest.raises(SystemExit):
+        ci.write_sums(tmp_path)

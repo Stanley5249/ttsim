@@ -248,8 +248,8 @@ def write_sums(dist: Path) -> tuple[list[Path], str]:
         path = dist / name
         if not path.is_file() or path.stat().st_size == 0:
             die(f"{name} is missing or empty")
-    packages = [path for path in libs if path.suffix == ".conda" and path.stat().st_size > 0]
-    if len(packages) != 1:
+    packages = [path for path in libs if path.suffix == ".conda"]
+    if len(packages) != 1 or not packages[0].is_file() or packages[0].stat().st_size == 0:
         die(f"expected one non-empty conda package in {dist}, found {[p.name for p in packages]}")
     sums = "".join(f"{sha256(path)}  {path.name}\n" for path in libs)
     (dist / SUMS).write_bytes(sums.encode())
