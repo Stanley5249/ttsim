@@ -44,7 +44,7 @@ COMMITTER = {
     "GIT_COMMITTER_EMAIL": "41898282+github-actions[bot]@users.noreply.github.com",
 }
 # The libraries a release must carry; the multi-chip ones are published too when built
-REQUIRED_LIBS = ["libttsim_wh.so", "libttsim_wh_aarch64.so", "libttsim_bh.so", "libttsim_bh_aarch64.so"]
+REQUIRED_LIBS = ["libttsim_wh.so", "libttsim_bh.so"]
 SUMS = "SHA256SUMS"
 VERSION = re.compile(r"v\d+\.\d+\.\d+")
 STEPS_VERSION = re.compile(r"v\d+\.\d+\.\d+-steps\.\d+")

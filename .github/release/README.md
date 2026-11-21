@@ -29,11 +29,13 @@ stepping clock. `v1.12.1-steps.2`, `v1.15.1-steps.2`, and `v1.16.0-steps.2` use
 unit tick, and `v1.12.1-steps.3` and `v1.16.0-steps.3` add the fp32 fix below.
 Each release's notes name its patch file and blob.
 
-The two Ubuntu 24.04 build jobs, x86_64 and aarch64, run style and wall-clock behavior checks.
+The Ubuntu 24.04 x86_64 build job runs style and wall-clock behavior checks.
+Releases carry no aarch64 libraries, because nothing downstream runs on Arm;
+releases before `v1.15.1-steps.3` keep the ones they have.
 Pushes and pull requests build the same candidate a release would, the highest
 upstream release with its patch, so they test the patch, not `src/` on `main`,
 which stays equal to upstream.
-Ubuntu 24.04 artifacts supply the release libraries. Publishing creates a draft,
+Its artifacts supply the release libraries. Publishing creates a draft,
 checks asset sizes and hashes, then makes it public automatically. Old-version
 backfills do not take the latest label from a newer version.
 
@@ -116,7 +118,7 @@ gh api "repos/Stanley5249/ttsim/releases/tags/$tag" \
   > "$dist/SHA256SUMS"
 gh release download "$tag" -R Stanley5249/ttsim --pattern 'libttsim_*.so' --dir "$dist"
 (cd "$dist" && sha256sum --check --strict SHA256SUMS)
-rm "$dist"/*_aarch64.so  # the package holds the x86_64 libraries only
+rm -f "$dist"/*_aarch64.so  # the package holds the x86_64 libraries only
 RELEASE_TAG=$tag TTSIM_DIST=$dist \
   pixi exec -s "rattler-build 0.80.*" -- \
   rattler-build build --recipe .github/release/conda/recipe.yaml --output-dir "$out"
