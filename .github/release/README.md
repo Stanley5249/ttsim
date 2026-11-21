@@ -8,10 +8,9 @@ Select `validate_only` on a manual run to build the candidate even when already
 released, without creating tags or releases. Scheduled runs always publish new
 versions after validation.
 
-`release.py` selects a version and applies `unit-tick.patch`, or the form of it
-that `PATCHES` names for that version. Upstream `v1.12.1` predates the eth busy
-steps, so it takes `unit-tick-v1.12.1.patch`, which changes only the Tensix tile
-loop. The build jobs get the upstream tag to pick the same patch. Every build
+`release.py` selects a version and applies `unit-tick.patch`. A version it
+does not fit, such as `v1.12.1`, which predates the eth busy steps, can no
+longer be released; its published builds stay valid. Every build
 job reconstructs the candidate and checks its commit SHA. Fixed commit metadata
 makes this reproducible without pushing temporary branches. Build jobs have
 read access only. The publishing job runs controller code, never candidate code.
@@ -26,7 +25,8 @@ Tags keep the `-steps.N` suffix of the earlier `stepping-clock.patch`, which
 counted steps in the wall clock instead. `v1.11.1`, `v1.14.0`, and `v1.15.0`
 `-steps.1`, and `-steps.1` of `v1.12.1`, `v1.15.1`, and `v1.16.0`, use that
 stepping clock. `v1.12.1-steps.2`, `v1.15.1-steps.2`, and `v1.16.0-steps.2` use
-unit tick, and `v1.12.1-steps.3` and `v1.16.0-steps.3` add the fp32 fix below.
+unit tick, and the `-steps.3` of `v1.12.1`, `v1.15.1`, and `v1.16.0` add the fp32
+fix below.
 Each release's notes name its patch file and blob.
 
 The Ubuntu 24.04 x86_64 build job runs style and wall-clock behavior checks.
@@ -105,29 +105,9 @@ UMD reads the descriptor beside the library and fails without it, as tt-metal
 rattler-build stamps the build time into the package, so a rebuild of the same
 tag has a new sha256. Public assets are never rebuilt, so a pinned hash holds.
 
-Releases published before the package existed get it by hand, once. From the
-repository root, download the libraries, check them against the asset digests,
-build, and upload. The upload has no `--clobber`, so it refuses to replace an
-existing package.
-
-```sh
-tag=vX.Y.Z-steps.N
-dist=$(mktemp -d) out=$(mktemp -d)
-gh api "repos/Stanley5249/ttsim/releases/tags/$tag" \
-  --jq '.assets[] | select(.name | test("^libttsim_.*\\.so$")) | "\(.digest | ltrimstr("sha256:"))  \(.name)"' \
-  > "$dist/SHA256SUMS"
-gh release download "$tag" -R Stanley5249/ttsim --pattern 'libttsim_*.so' --dir "$dist"
-(cd "$dist" && sha256sum --check --strict SHA256SUMS)
-rm -f "$dist"/*_aarch64.so  # the package holds the x86_64 libraries only
-RELEASE_TAG=$tag TTSIM_DIST=$dist \
-  pixi exec -s "rattler-build 0.80.*" -- \
-  rattler-build build --recipe .github/release/conda/recipe.yaml --output-dir "$out"
-gh release upload "$tag" -R Stanley5249/ttsim "$out"/linux-64/ttsim-*.conda
-```
-
 ## Native fp32 compute configurations
 
-Both unit-tick patch variants also accept the Wormhole LLK TEN-3868 trailing
+unit-tick.patch also accepts the Wormhole LLK TEN-3868 trailing
 UNPACR. Float32-to-Float32 Src writes require Dvalid to remain clear and lose
 13 mantissa bits, like TF32. The trailing SrcA zero-fill is accepted only with
 these formats and no Dvalid. Readable Float32 Src writes still fail.

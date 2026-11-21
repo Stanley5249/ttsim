@@ -2,12 +2,12 @@
 """Release an upstream tenstorrent/ttsim vX.Y.Z as the fork release vX.Y.Z-steps.N.
 
 A release is the upstream tag commit with unit-tick.patch applied on top. The patch steps each Tensix tile and eth core
-once per clock, so the wall clock, which counts clocks, never repeats on one core. PATCHES names another form of the
-patch for an upstream version whose source the patch does not fit, such as unit-tick-v1.12.1.patch. The -steps.N
+once per clock, so the wall clock, which counts clocks, never repeats on one core. The -steps.N
 suffix stays from the earlier stepping-clock patch, so tags keep one numbering per upstream version. The candidate
 commit is a pure function of the upstream commit and the patch for its tag (fixed committer, committer date taken from
 the patch), so every job rebuilds the same SHA instead of passing commits between jobs. Published tags are the only
-state: a tag whose tree equals the candidate's is that release.
+state: a tag whose tree equals the candidate's is that release. An upstream version the patch does not fit, such as
+v1.12.1, which predates the eth busy steps it removes, can no longer be released; its published builds stay.
 
 Regenerate the patch from a commit with
 
@@ -31,13 +31,6 @@ from typing import NoReturn, TypedDict
 UPSTREAM_REPO = "tenstorrent/ttsim"
 UPSTREAM_URL = f"https://github.com/{UPSTREAM_REPO}"
 PATCH = Path(__file__).resolve().with_name("unit-tick.patch")
-# Upstream versions that take another form of PATCH; v1.12.1 predates the eth busy steps that PATCH removes
-PATCHES = {"v1.12.1": PATCH.with_name("unit-tick-v1.12.1.patch")}
-# Fork tags from before every release was one patch commit on upstream, with the commit each tag and its upstream base
-# were at. A legacy tag is skipped only while both still match, so a moved upstream tag still stops the plan.
-LEGACY_TAGS = {
-    "v1.12.1-steps.1": ("e11f0592c8d95566a56f512464a9057c331c5b31", "ac0c840f7e314df2e5cf5a3082b80eee32080dca"),
-}
 CANDIDATE_DIR = "candidate"
 COMMITTER = {
     "GIT_COMMITTER_NAME": "github-actions[bot]",
@@ -147,14 +140,9 @@ def resolve_upstream(tag: str) -> str:
     return sha
 
 
-def patch_for(tag: str) -> Path:
-    """Return the patch that releases upstream tag."""
-    return PATCHES.get(tag, PATCH)
-
-
 def make_candidate(tag: str, upstream_sha: str) -> str:
-    """Check out upstream_sha in a worktree and apply the patch for tag, failing on anything but a clean apply."""
-    patch = patch_for(tag)
+    """Check out upstream_sha in a worktree and apply the patch, failing on anything but a clean apply."""
+    patch = PATCH
     run("git", "fetch", "--no-tags", UPSTREAM_URL, upstream_sha, attempts=NETWORK_ATTEMPTS)
     git("worktree", "add", "--detach", CANDIDATE_DIR, upstream_sha)
     applied = run(
@@ -195,18 +183,13 @@ def plan(args: argparse.Namespace) -> None:
     release_tag = f"{tag}-steps.{numbers[-1] + 1 if numbers else 1}"
     for n in numbers:
         steps_tag = f"{tag}-steps.{n}"
-        if steps_tag in LEGACY_TAGS:
-            if (git("rev-parse", f"{steps_tag}^{{commit}}"), upstream_sha) != LEGACY_TAGS[steps_tag]:
-                die(f"{steps_tag} or upstream {tag} moved from the commits recorded in LEGACY_TAGS")
-            log(f"{steps_tag} predates one-commit releases, so it is not this candidate")
-            continue
         # Every fork tag is one patch commit on its upstream base. Refuse a moved upstream tag.
         if git("rev-parse", f"{steps_tag}^") != upstream_sha:
             die(f"upstream {tag} no longer matches the base of {steps_tag}")
         if git("rev-parse", f"{steps_tag}^{{tree}}") != tree:
             continue
         if is_published(repo, steps_tag):
-            log(f"{steps_tag} already releases upstream {tag} ({upstream_sha}) with {patch_for(tag).name}")
+            log(f"{steps_tag} already releases upstream {tag} ({upstream_sha}) with {PATCH.name}")
             release_tag = ""
         elif git("rev-parse", f"{steps_tag}^{{commit}}") == candidate:
             log(f"{steps_tag} was tagged but not published; resuming it")
@@ -272,7 +255,7 @@ def publish(args: argparse.Namespace) -> None:
         log(f"{args.release_tag} is already published; leaving it as is")
         return
     server = os.environ["GITHUB_SERVER_URL"]
-    patch = patch_for(args.upstream_tag)
+    patch = PATCH
     patch_path = patch.relative_to(Path(__file__).resolve().parents[2])
     notes = (
         f"Upstream [`{args.upstream_tag}`]({UPSTREAM_URL}/releases/tag/{args.upstream_tag}) (`{args.upstream_sha}`) "
