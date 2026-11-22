@@ -13,10 +13,10 @@ skip_files = {
     'data/wh/eth_fw.bin',
 }
 
-# Fork release tooling follows ruff format and keeps a uv-generated lockfile, so those files have their own checks
+# Fork release tooling follows ruff format and keeps a pixi-generated lockfile, so those files have their own checks
 skip_tool_dir = '.github/release/'
 skip_tool_suffix = '.py'
-skip_tool_lockfile = 'uv.lock'
+skip_tool_lockfile = 'pixi.lock'
 
 n_errors = 0
 

@@ -37,19 +37,22 @@ jobs:
       with:
         persist-credentials: false
 
-    - uses: astral-sh/setup-uv@v10.4.0
+    - uses: prefix-dev/setup-pixi@v0.11.3
+      with:
+        manifest-path: .github/release/pyproject.toml
+        activate-environment: true
 
     - name: Check Format
-      run: uv run --locked ruff format --check
+      run: ruff format --check
 
     - name: Lint
-      run: uv run --locked ruff check
+      run: ruff check
 
     - name: Type Check
-      run: uv run --locked pyrefly check
+      run: pyrefly check
 
     - name: Test Release Decisions
-      run: uv run --locked pytest
+      run: pytest
 
     - name: Run Style Checker
       working-directory: .

@@ -54,15 +54,15 @@ Regenerate a patch using the command at the top of `release.py`. Versions for
 which the patch conflicts are not released; support requires adapting
 `unit-tick.patch` to them. Do not suppress simulator error checks to make a release pass.
 
-Lint, type-check, and test the controller from `.github/release`. It is a uv
-project with dev tools locked in `uv.lock`. `scripts/check_style.py` skips its
-Python files and lockfile, which follow `ruff format` and uv instead.
+Lint, type-check, and test the controller from `.github/release`. It is a pixi
+workspace with dev tools locked in `pixi.lock`. `scripts/check_style.py` skips
+its Python files and lockfile, which follow `ruff format` and pixi instead.
 
 ```sh
-uv run --locked ruff format
-uv run --locked ruff check
-uv run --locked pyrefly check
-uv run --locked pytest
+pixi run --locked ruff format
+pixi run --locked ruff check
+pixi run --locked pyrefly check
+pixi run --locked pytest
 ```
 
 Run the behavioral check with

@@ -5,15 +5,16 @@ description = "Fork release tooling for tenstorrent/ttsim"
 requires-python = ">=3.10"
 dependencies = []
 
-[dependency-groups]
-dev = [
-    "pyrefly",
-    "pytest",
-    "ruff",
-]
+# The dev tools; release.py itself runs on the runner's python3.
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
 
-[tool.uv]
-package = false
+[tool.pixi.dependencies]
+python = ">=3.10"
+pyrefly = "*"
+pytest = "*"
+ruff = "*"
 
 [tool.ruff]
 line-length = 120
