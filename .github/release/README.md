@@ -1,7 +1,7 @@
 # Automatic upstream releases
 
 The Release workflow checks the highest published, non-prerelease upstream
-`vX.Y.Z` release daily at 22:17 UTC. It does not backfill skipped releases.
+`vX.Y.Z` release daily, on the schedule in `.github/workflows/release.yml`. It does not backfill skipped releases.
 A manual run can select an older upstream release if the patch applies to it.
 There is no dependency on tt-metal, and no approval gate for routine releases.
 Select `validate_only` on a manual run to build the candidate even when already
@@ -93,7 +93,7 @@ Each release also carries `ttsim-X.Y.Z+steps.N-0.conda` for `linux-64`,
 because conda versions cannot contain `-`. It installs the x86_64 libraries
 byte for byte as `lib/ttsim/{wh,bh}/libttsim_<chip>[_xN].so`. Consumers pin it
 by URL and sha256, which the publish job prints in its summary. The `package`
-job builds it with rattler-build 0.80 through `pixi exec`, and the
+job builds it through `pixi exec` with the rattler-build pin in that workflow, and the
 publish job uploads and verifies it with the libraries in the same draft.
 
 The package ships no `soc_descriptor.yaml`. tt-metal owns its descriptors, also
