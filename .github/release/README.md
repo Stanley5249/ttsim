@@ -22,8 +22,8 @@ clock registers stay as upstream and return `g_clock`, which now gives every
 step of a core its own time. Simulation runs slower in exchange.
 
 Tags keep the `-steps.N` suffix of the earlier `stepping-clock.patch`, which
-counted steps in the wall clock instead. Every `-steps.1` release, of
-`v1.11.1`, `v1.12.1`, `v1.14.0`, `v1.15.0`, `v1.15.1`, and `v1.16.0`, uses that
+counted steps in the wall clock instead. The `-steps.1` releases of
+`v1.11.1`, `v1.12.1`, `v1.14.0`, `v1.15.0`, `v1.15.1`, and `v1.16.0` use that
 stepping clock. `v1.12.1-steps.2`, `v1.15.1-steps.2`, and `v1.16.0-steps.2` use
 unit tick, and the `-steps.3` of `v1.12.1`, `v1.15.1`, and `v1.16.0` add the fp32
 fix below.
