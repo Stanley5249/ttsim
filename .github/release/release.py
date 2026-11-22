@@ -77,14 +77,16 @@ def run(
     *cmd: str, cwd: str = ".", env: dict[str, str] | None = None, attempts: int = 1, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
     """Run cmd, retrying network commands so a transient failure does not fail the run."""
-    for attempt in range(1, attempts + 1):
+    attempt = 1
+    while True:
         result = subprocess.run(
             cmd, cwd=cwd, env={**os.environ, **(env or {})}, capture_output=True, text=True, check=False
         )
-        if result.returncode == 0 or attempt == attempts:
+        if result.returncode == 0 or attempt >= attempts:
             break
         log(f"retrying after: {' '.join(cmd)}: {result.stderr.strip()}")
         time.sleep(10 * attempt)
+        attempt += 1
     if check and result.returncode != 0:
         die(f"{' '.join(cmd)} failed:\n{result.stderr.strip()}")
     return result
