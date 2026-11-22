@@ -59,10 +59,10 @@ workspace with dev tools locked in `pixi.lock`. `scripts/check_style.py` skips
 its Python files and lockfile, which follow `ruff format` and pixi instead.
 
 ```sh
-pixi run --locked ruff format
-pixi run --locked ruff check
-pixi run --locked pyrefly check
-pixi run --locked pytest
+pixi run ruff format
+pixi run ruff check
+pixi run pyrefly check
+pixi run pytest
 ```
 
 Run the behavioral check with
