@@ -39,9 +39,6 @@ jobs:
 
     - uses: astral-sh/setup-uv@v10.4.0
 
-    - name: Check Lockfile
-      run: uv lock --check
-
     - name: Check Format
       run: uv run --locked ruff format --check
 
